@@ -1,0 +1,33 @@
+# OPTIONAL — only for local Hugging Face model mode (HF_USE_LOCAL=1).
+# Do NOT install this for the normal chatbot, and do NOT install it to
+# get the API mode: the API mode (HF_TOKEN set) needs no extra packages
+# beyond the main requirements.txt (it uses `requests`, already there).
+#
+# PYTHON VERSION WARNING — read this first, it is the most common failure:
+# torch has no wheel for Python 3.15 (latest torch supports up to Python
+# 3.14). On Python 3.15, pip fails with:
+#   "Could not find a version that satisfies the requirement torch>=2.3
+#    (from versions: none)"
+# Upgrading pip does NOT fix that. Install Python 3.13 alongside, then
+# build the venv with it:  py -3.13 -m venv venv
+# and install requirements.txt + requirements-llm.txt into that venv.
+# The normal chatbot (without torch) works fine on Python 3.15; only the
+# local LLM install needs 3.10-3.14.
+#
+# Local mode needs a real model in RAM. On an ~8 GB PC, use the default
+# selected model Qwen/Qwen2.5-0.5B-Instruct (~1 GB). Do not install this
+# file and then force a 3B/7B model on a small machine.
+#
+# torch is large (~800 MB-2 GB depending on platform). For CPU-only
+# Windows, pip will pick the CPU wheel from PyPI by default in recent
+# versions; if you get a CUDA-sized download you do not want, install
+# torch from the CPU index first, then install the rest of this file
+# without dependencies for torch:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+transformers>=4.44
+torch>=2.3
+accelerate>=0.33
+huggingface_hub>=0.24
+safetensors>=0.4
+# Optional, only for HF_QUANTIZE=4bit:
+# bitsandbytes>=0.43

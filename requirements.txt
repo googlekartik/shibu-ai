@@ -1,0 +1,15 @@
+Flask>=3.0
+Flask-CORS>=4.0
+python-dotenv>=1.0
+SymPy>=1.12
+ReportLab>=4.0
+requests>=2.31
+# Document intelligence
+pypdf>=4.0
+python-docx>=1.1
+openpyxl>=3.1
+# File generation
+python-pptx>=0.6.21
+# Optional: faster / more reliable DuckDuckGo search. The app works without it.
+ddgs>=9.0; python_version >= "3.9"
+pytest>=8.0

@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Shibu AI — Rule-Based Intelligent Chatbot</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><img class="avatar" src="{{ url_for('static', filename='images/shibu.png') }}" alt="Shibu AI"> Shibu AI</div>
+  <div class="header-actions">
+    <button id="historyBtn" type="button" class="text-btn">History</button>
+    <button id="detailsBtn" type="button" class="text-btn">Details</button>
+    <button id="clearBtn" type="button" class="text-btn">Clear</button>
+  </div>
+</header>
+
+<div id="historyPanel" class="details hidden">
+  <div class="details-inner">
+    <h3 class="history-title">History</h3>
+    <p class="muted small">Your past questions in this browser. Click one to ask Shibu AI again.</p>
+    <ul id="historyList" class="history-list"></ul>
+    <p id="historyEmpty" class="muted small">No history yet — ask something first!</p>
+  </div>
+</div>
+
+<div id="details" class="details hidden">
+  <div class="details-inner">
+    <p><strong>Intent:</strong> <span id="exIntent">—</span> &nbsp;·&nbsp;
+       <strong>Rule:</strong> <span id="exRule">—</span> &nbsp;·&nbsp;
+       <strong>Confidence:</strong> <span id="exConf">—</span></p>
+    <p><strong>Action:</strong> <span id="exAction">—</span> &nbsp;·&nbsp;
+       <strong>Tool:</strong> <span id="exTool">—</span> &nbsp;·&nbsp;
+       <strong>Time:</strong> <span id="exTime">—</span></p>
+    <p class="muted small">Agent environment: Partially Observable · Deterministic · Sequential · Static.
+       Pipeline: Perception → State → Rule Engine → Decision → Action → Response.</p>
+  </div>
+</div>
+
+<main class="chat-wrap">
+  <div id="messages" class="messages" aria-live="polite"></div>
+  <div id="typing" class="typing hidden">Thinking…</div>
+
+  <form id="composer" class="composer">
+    <button id="attachBtn" type="button" aria-label="Upload a document">📎</button>
+    <input id="fileInput" type="file" accept=".pdf,.docx,.xlsx" hidden>
+    <textarea id="input" rows="1" placeholder="Ask anything…"></textarea>
+    <button id="micBtn" type="button" aria-label="Voice input">🎤</button>
+    <button id="sendBtn" type="submit" aria-label="Send">↑</button>
+  </form>
+  <p class="footnote">Type naturally — e.g. “What is Python?”, “Calculate 25% of 800”, “Search latest AI news”, or “Create a PDF about Python”.</p>
+</main>
+
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

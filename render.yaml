@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: shibu-ai
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
+      - key: HOST
+        value: 0.0.0.0
+      # Set these in the Render dashboard (never in git):
+      # OPENAI_API_KEY, HF_TOKEN, SECRET_KEY
