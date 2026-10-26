@@ -1,7 +1,7 @@
 # Shibu AI — Rule-Based Intelligent Chatbot
 
 A complete, runnable university-level project: a **rule-based intelligent agent**
-named **Shibu AI** (cute anime avatar in the top-left corner, `static/images/shibu.png`)
+named **Shibu AI** (cute anime avatar in the top-left corner, `static/shibu.png`)
 in Python + Flask, with SymPy maths, DuckDuckGo web search, ReportLab PDF
 export, session memory, and explainability details. The UI is clean and
 Muse-style: a black background, a centred chat column, and just one text
@@ -186,3 +186,11 @@ Database persistence, user login, voice input/output, RAG over documents, larger
 **GitHub:** The project is ready to push — `.gitignore` excludes `.env`, `venv/`, `generated/` and `uploads/`, so no secrets or outputs are committed. Create a repo on GitHub (e.g. `shibu-ai`), then push the project folder. Never commit `.env`.
 
 **Cloud (Render, free plan):** The project includes `Procfile` (`web: python app.py`), `render.yaml`, and `runtime.txt` (Python 3.12). On Render: New > Web Service > connect your GitHub repo, it will use `render.yaml` (build: `pip install -r requirements.txt`, start: `python app.py`). Then in Render's Environment tab, set `SECRET_KEY`, and either `OPENAI_API_KEY` or `HF_TOKEN` — do not put keys in the repo. The app listens on `0.0.0.0:$PORT`, which is what a cloud host requires (locally it still opens at http://127.0.0.1:5000). Note: Render's free plan sleeps after inactivity, so the first visit after a pause can take ~30-60 seconds to wake up. Uploaded documents and generated files are stored on the server's disk, so they do not survive a redeploy/restart on a free plan — download anything important first.
+
+## 19. New topics, conversation, and text-processed web answers (2026-10-27)
+
+**Topics now covered (153 rules total):** Science (physics, Newton's laws, gravity, energy, light, sound, chemistry, atom, periodic table, acids/bases, biology, cell, photosynthesis, human body, ecosystem), Social Studies (history, India's independence, geography, continents/oceans, climate, civics/democracy, Constitution of India, economics, demand/supply), GK (capital of India, largest planet, tallest mountain, national symbols, first President/PM, longest river, fastest animals), Maths topics (algebra, geometry, trigonometry, fractions, percentages, ratio, average, prime numbers, number system), Reasoning (logical reasoning, deductive/inductive, series, coding-decoding, blood relations, direction sense), English (parts of speech, noun, verb, tenses, active/passive, articles/prepositions, synonym/antonym), and Hindi (Hindi language, sandhi, samas, paryayvachi/vilom, sangya/kriya, varnamala).
+
+**Conversation:** Shibu can now chat, not just answer FAQs — hobbies, favourites, "are you human?", friend, bored, motivation, age, where it lives, stories, "and you?", "interesting", "talk to me". Try: "Synonym of happy", "Antonym of big", "Next number in series 2, 4, 6, 8".
+
+**Text processing for web answers (the main change):** Raw DuckDuckGo snippets are now cleaned (HTML/whitespace removed), split into sentences, scored by query-keyword coverage, deduplicated, and presented as a short summary + key points + sources (see `services/web_answer.py` and `utils/text_processing.py`). Most importantly, the old dead-end — "I don't have a specific rule for that term yet" — is now a web fallback: if a "what is X" question has no rule and no LLM, Shibu searches the web, processes the results, and returns a labelled web answer with sources. If the web also returns nothing, it falls back to the honest rule message. Web answers are never presented as rule-database answers.

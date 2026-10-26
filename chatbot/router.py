@@ -15,6 +15,7 @@ from chatbot.rule_engine import match_rule
 from services.math_service import MathService, looks_like_math
 from services.pdf_service import PDFService
 from services.web_search_service import WebSearchService
+from services.web_answer import format_web_answer, clean_search_topic
 from services.code_service import generate_code, debug_code, compare as compare_topics
 from services.code_runner import run_python_code
 from services.document_service import summarize as summarize_doc, answer_from_document, make_notes as make_doc_notes
@@ -57,33 +58,14 @@ def _is_search_request(low: str) -> bool:
 
 
 def _phrase_search_results(query: str, results) -> str:
-    """Turn raw search results into a phrased answer, with sources.
+    """Turn raw search results into a phrased, text-processed answer.
 
-    The first snippets become a short summary in Shibu AI's own words,
-    then every source is listed so the user can check it. Web results
-    are never presented as if they came from the rule database.
+    Uses services/web_answer: snippets are cleaned, split into
+    sentences, scored by query-keyword coverage, deduplicated, and
+    then presented as a short summary + key points + sources. Web
+    results are never presented as if they came from the rule database.
     """
-    snippets = [r["snippet"] for r in results if r.get("snippet")]
-    parts = [f"Here's what I found on the web about '{query}':"]
-    if snippets:
-        parts.append("")
-        parts.append("In short, according to the latest web results:")
-        for s in snippets[:3]:
-            clean = re.sub(r"\s+", " ", s).strip()
-            if clean and not clean.endswith("."):
-                clean += "."
-            parts.append(f"- {clean}")
-    parts.append("")
-    parts.append("Sources (from the web, not from my rule database):")
-    for i, r in enumerate(results, 1):
-        parts.append(f"{i}. {r['title']}")
-        if r.get("snippet"):
-            parts.append(f"   {r['snippet']}")
-        parts.append(f"   {r['url']}")
-    parts.append("")
-    parts.append("Want me to go deeper on any of these sources? Just tell me which one.")
-    return "\n".join(parts)
-
+    return format_web_answer(query, results)
 
 
 def _first_sentence(text: str) -> str:
@@ -140,6 +122,85 @@ def _llm_answer(user_message: str, context, processing_ms=0.0):
         intent="LLM_ANSWER", rule_id="llm_answer", confidence=0.65,
         tool="Hugging Face LLM", action="Generate conversational answer",
         processing_ms=processing_ms), None
+
+
+
+# Small built-in synonym / antonym lists for common school words.
+# Honest limit: if a word is not here, say so instead of guessing.
+_SYNONYMS = {
+    "happy": "joyful", "big": "large", "small": "tiny", "fast": "quick",
+    "good": "excellent", "bad": "poor", "smart": "intelligent",
+    "brave": "courageous", "rich": "wealthy", "angry": "furious",
+    "beautiful": "pretty", "strong": "powerful", "weak": "feeble",
+    "begin": "start", "end": "finish", "love": "adore",
+}
+_ANTONYMS = {
+    "happy": "sad", "big": "small", "fast": "slow", "good": "bad",
+    "smart": "foolish", "brave": "cowardly", "rich": "poor",
+    "strong": "weak", "begin": "end", "love": "hate",
+    "hot": "cold", "up": "down", "in": "out", "day": "night",
+}
+
+
+def _synonym_antonym_answer(low: str):
+    """Return a payload text for 'synonym of X' / 'antonym of X', or None."""
+    m = re.search(r"\b(synonym|antonym) of ([a-z]+)\b", low)
+    if not m:
+        return None
+    kind, word = m.group(1), m.group(2)
+    table = _SYNONYMS if kind == "synonym" else _ANTONYMS
+    if word in table:
+        return f"The {kind} of '{word}' is '{table[word]}'. Example: a synonym is a word with a similar meaning, an antonym is the opposite."
+    return f"I don't have '{word}' in my small synonym/antonym list yet, so I won't guess one. Words I do cover include: {', '.join(sorted(table))}. Try one of those, or use web search: 'Search synonym of {word}'."
+
+
+def _series_answer(low: str):
+    """Solve a simple arithmetic / geometric number series, or None."""
+    m = re.search(r"next (?:number|term) in (?:the )?series\s+([0-9,\s]+)", low)
+    if not m:
+        return None
+    try:
+        nums = [float(x) for x in m.group(1).replace(",", " ").split() if x.strip()]
+    except Exception:
+        return None
+    if len(nums) < 3:
+        return None
+    diffs = [nums[i + 1] - nums[i] for i in range(len(nums) - 1)]
+    if len(set(diffs)) == 1:
+        nxt = nums[-1] + diffs[0]
+        return f"Series: {', '.join(str(int(n)) if n.is_integer() else str(n) for n in nums)}. The difference is constant ({diffs[0]:g}), so it is an arithmetic series. Next term: {nxt:g}."
+    ratios = []
+    try:
+        ratios = [nums[i + 1] / nums[i] for i in range(len(nums) - 1) if nums[i] != 0]
+    except Exception:
+        ratios = []
+    if ratios and len(set(ratios)) == 1:
+        nxt = nums[-1] * ratios[0]
+        return f"Series: {', '.join(str(int(n)) if n.is_integer() else str(n) for n in nums)}. The ratio is constant ({ratios[0]:g}), so it is a geometric series. Next term: {nxt:g}."
+    return f"Series: {', '.join(str(int(n)) if n.is_integer() else str(n) for n in nums)}. I could not find a constant difference or ratio, so this is not a simple arithmetic or geometric series. Check for squares, cubes, or alternating patterns, and try again."
+
+
+def _web_fallback_answer(text: str, context, processing_ms=0.0):
+    """Try a text-processed web answer for an unknown/definition question.
+
+    Returns a payload or None (no results). This is what replaces the
+    old 'I don't have a specific rule for that term yet' dead end:
+    if the web has a sourced answer, show it, labelled as web-derived.
+    """
+    topic = clean_search_topic(text)
+    if not topic:
+        return None
+    results = search_service.search(topic)
+    if not results:
+        return None
+    payload = format_response(
+        text=format_web_answer(topic, results),
+        intent="WEB_SEARCH", rule_id="web_fallback", confidence=0.85,
+        tool="DuckDuckGo search + text processing", action="Answer unknown topic from web",
+        extra={"search_results": results, "search_query": topic},
+        processing_ms=processing_ms)
+    context.add_exchange(text, payload["response"], "WEB_SEARCH", "web_fallback", 0.85)
+    return payload
 
 
 def process_single_message(message: str, context, processing_ms=0.0):
@@ -456,6 +517,18 @@ def process_single_message(message: str, context, processing_ms=0.0):
             context.add_exchange(text, payload["response"], rule["intent"], rule["rule_id"], rule["confidence"], topic=rule.get("topic", ""))
             return payload
 
+    # 5j) Synonym / antonym lookup and number-series solver
+    _vocab = _synonym_antonym_answer(low)
+    if _vocab:
+        payload = format_response(text=_vocab, intent="VOCABULARY", rule_id="vocabulary_lookup", confidence=0.90, tool="Vocabulary list", action="Synonym / antonym lookup", processing_ms=processing_ms)
+        context.add_exchange(text, payload["response"], "VOCABULARY", "vocabulary_lookup", 0.90)
+        return payload
+    _series = _series_answer(low)
+    if _series:
+        payload = format_response(text=_series, intent="REASONING_SERIES", rule_id="series_solver", confidence=0.95, tool="Reasoning solver", action="Solve number series", processing_ms=processing_ms)
+        context.add_exchange(text, payload["response"], "REASONING_SERIES", "series_solver", 0.95)
+        return payload
+
     # 6) Rule engine, with the LLM as a labelled fallback for UNKNOWN or
     # low-confidence answers only. High-confidence rule answers, maths,
     # search, documents and files above are never replaced by the model.
@@ -465,6 +538,13 @@ def process_single_message(message: str, context, processing_ms=0.0):
         if llm is not None:
             context.add_exchange(text, llm["response"], "LLM_ANSWER", "llm_answer", 0.65)
             return llm
+    # New: if the best rule is the generic "definition" fallback (or
+    # UNKNOWN with no LLM), try a text-processed web answer first.
+    # This replaces the old dead-end message for unknown topics.
+    if rule["intent"] == "UNKNOWN" or rule["rule_id"] == "definition":
+        web_payload = _web_fallback_answer(text, context, processing_ms)
+        if web_payload is not None:
+            return web_payload
     adapted = _adapt_to_preferences(rule["response"], context)
     if rule["intent"] != "UNKNOWN" and rule["confidence"] < 0.45:
         adapted += "\n\nNote: My confidence here is low, so please double-check this — I am not presenting a guess as a fact."
