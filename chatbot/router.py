@@ -25,7 +25,9 @@ from services.conversation_manager import build_messages, detect_language
 from services.environment_analyzer import (
     analyze_environment, format_environment_table, is_explicit_request,
     should_analyze)
-from services.context_memory import resolve_followup
+from services.context_memory import (
+    apply_math_followup, resolve_followup, resolve_math_followup,
+    resolve_previous_reference)
 from services.response_generator import validate_llm_answer, format_llm_answer
 import os
 from utils.text_processing import normalize_for_matching
@@ -258,6 +260,42 @@ def process_single_message(message: str, context, processing_ms=0.0):
                 extra={"calculation": result}, processing_ms=processing_ms)
             context.add_exchange(text, payload["response"], "MATHEMATICS_STEP_BY_STEP", "math_steps", 0.99)
             return payload
+
+    # 0b) Arithmetic on the previous answer — BEFORE maths, rules and
+    # web search, or a message like "add 967464 in privious answer"
+    # falls through to UNKNOWN and then to a web search (the bug in
+    # the screenshot: first sum 49933, second message web-searched
+    # instead of adding). This step uses the task memory in the
+    # context (active_task + last_numeric_value), never the web.
+    _math_follow = resolve_math_followup(text, context)
+    if _math_follow is not None:
+        if _math_follow["kind"] == "clarify":
+            payload = format_response(text=_math_follow["question"], intent="CLARIFY",
+                rule_id="clarify_math_followup", confidence=0.90,
+                tool="Conversation context", action="Ask clarifying question",
+                processing_ms=processing_ms)
+            context.add_exchange(text, payload["response"], "CLARIFY", "clarify_math_followup", 0.90)
+            return payload
+        payload = format_response(text=apply_math_followup(_math_follow),
+            intent="MATH_FOLLOWUP", rule_id="math_followup", confidence=0.99,
+            tool="Conversation context + SymPy maths", action="Calculate from previous answer",
+            processing_ms=processing_ms)
+        context.add_exchange(text, payload["response"], "MATH_FOLLOWUP", "math_followup", 0.99)
+        return payload
+    _prev_ref = resolve_previous_reference(text, context)
+    if _prev_ref is not None:
+        if _prev_ref["kind"] == "show_previous":
+            payload = format_response(text=_prev_ref["answer"], intent="FOLLOW_UP",
+                rule_id="context_show_previous", confidence=0.95,
+                tool="Conversation context", action="Show previous answer",
+                processing_ms=processing_ms)
+        else:
+            payload = format_response(text=_prev_ref["question"], intent="CLARIFY",
+                rule_id="clarify_previous", confidence=0.90,
+                tool="Conversation context", action="Ask clarifying question",
+                processing_ms=processing_ms)
+        context.add_exchange(text, payload["response"], payload["intent"], payload["rule_id"], payload["confidence"])
+        return payload
 
     # 1) Mathematics (explicit calculate / maths syntax)
     if looks_like_math(text):

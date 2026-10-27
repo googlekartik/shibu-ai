@@ -1,5 +1,33 @@
 """Session-based conversation context (in-memory, no database)."""
+import re
 import threading
+
+
+def _fmt_num(value):
+    if value is None:
+        return ""
+    if abs(value - round(value)) < 1e-9:
+        return str(int(round(value)))
+    return ("%.6f" % value).rstrip("0").rstrip(".")
+
+
+def _extract_numeric_answer(bot_response):
+    """Last numeric result in an answer, or None.
+
+    Maths answers are "… = 49933\nAnswer: 49933" and series answers
+    are "Next term: 32", so those two markers are trusted. Other
+    answers (a year, a count inside prose) are NOT treated as a
+    result to calculate with — guessing there would be wrong.
+    """
+    # The number must end the answer (or the line): "Answer: 3*x**2"
+    # for a derivative must NOT be read as the result 3.
+    m = re.search(r"Answer:\s*(-?[\d,]+(?:\.\d+)?)\s*(?:\n|$)", bot_response or "")
+    if m:
+        return float(m.group(1).replace(",", ""))
+    m = re.search(r"Next term:\s*(-?[\d,]+(?:\.\d+)?)\s*\.?\s*(?:\n|$)", bot_response or "")
+    if m:
+        return float(m.group(1).replace(",", ""))
+    return None
 
 
 class ConversationContext:
@@ -23,6 +51,14 @@ class ConversationContext:
         # tone: "normal" | "simple" | "concise" | "detailed"
         # level: "normal" | "beginner" | "expert"
         self.preferences = {"tone": "normal", "level": "normal"}
+        # What the user is currently doing in this chat, in plain
+        # words — e.g. a running calculation — plus the last numeric
+        # result, so a follow-up like "add 5 in previous answer"
+        # continues the same task instead of starting a web search.
+        # This is task memory only: it never holds secrets, and it is
+        # replaced (not mixed) when the user starts a new topic.
+        self.active_task = ""
+        self.last_numeric_value = None
         # Last uploaded document (set by /api/upload).
         self.last_document = ""       # filename
         self.last_document_text = ""  # extracted plain text
@@ -39,6 +75,19 @@ class ConversationContext:
         self.last_confidence = confidence
         if topic:
             self.last_topic = topic
+        # Task memory: a calculation sets (and a calculation follow-up
+        # updates) the running total; a new topic replaces the task.
+        # Follow-up wrappers (explain simply, etc.) leave it alone.
+        if intent in ("MATHEMATICS", "MATHEMATICS_STEP_BY_STEP",
+                      "REASONING_SERIES", "MATH_FOLLOWUP"):
+            value = _extract_numeric_answer(bot_response)
+            if value is not None:
+                self.last_numeric_value = value
+                self.active_task = (f"Running calculation — last result "
+                                    f"{_fmt_num(value)}")
+        elif intent not in ("FOLLOW_UP", "CLARIFY") and topic:
+            self.active_task = f"Discussing {topic}"
+            self.last_numeric_value = None
         self.conversation_history.append({"role": "user", "text": user_message})
         self.conversation_history.append({"role": "bot", "text": bot_response})
         # Keep memory bounded.
@@ -82,6 +131,9 @@ class ConversationContext:
             "last_document": self.last_document,
             "summary": self.summary,
             "recent_pairs": self.recent_pairs(),
+            "active_task": self.active_task,
+            "last_numeric_answer": (_fmt_num(self.last_numeric_value)
+                                     if self.last_numeric_value is not None else None),
         }
 
 

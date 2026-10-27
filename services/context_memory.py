@@ -35,6 +35,149 @@ resolve_followup() returns:
 import re
 
 
+# "previous" and its common misspellings, as the user wrote "privious".
+_PREV = r"(?:previous|previos|privious|previus|prev|last|above|earlier|that)"
+_ANS = r"(?:answer|result|total|value|number|sum)"
+_NUM = r"(-?[\d,]+(?:\.\d+)?)"
+
+
+def _fmt(value):
+    if abs(value - round(value)) < 1e-9:
+        return str(int(round(value)))
+    return ("%.6f" % value).rstrip("0").rstrip(".")
+
+
+def _previous_number(context):
+    value = getattr(context, "last_numeric_value", None)
+    if value is not None:
+        return value
+    # Fallback for answers recorded before this memory existed.
+    bot = getattr(context, "last_main_response", "") or ""
+    m = re.search(r"Answer:\s*(-?[\d,]+(?:\.\d+)?)\s*(?:\n|$)", bot)
+    return float(m.group(1).replace(",", "")) if m else None
+
+
+def resolve_math_followup(text, context):
+    """Arithmetic on the previous answer, e.g. the screenshot case.
+
+    "add 967464 in privious answer" after an answer of 49933 must
+    return 49933 + 967464 = 1017397 — never a web search. Also
+    handles "subtract X from previous answer", "multiply previous
+    answer by X", "previous answer + X", and a bare "add X" while a
+    running calculation is the current task.
+
+    Returns {"kind": "math_followup", "previous": float,
+    "operand": float, "operation": str, "symbol": str} or
+    {"kind": "clarify", "question": str} when the user clearly means
+    the previous answer but there is no numeric result to use, or
+    None when this is not a previous-answer arithmetic message.
+    """
+    low = text.lower().strip()
+    has_prev_ref = bool(re.search(rf"\b{_PREV}\b.*\b{_ANS}\b|\b{_ANS}\b.*\b{_PREV}\b", low))
+    op = None
+    operand = None
+
+    # Forms with an explicit previous-answer reference.
+    patterns = [
+        rf"^(?:now\s+|also\s+|and\s+)?(add|plus|subtract|minus|deduct|multiply|times|divide)\s+{_NUM}\b.*\b{_PREV}\b",
+        rf"\b{_PREV}\b\s*{_ANS}\b.*?(add|plus|subtract|minus|deduct|multiply|times|divide)\s+{_NUM}\b",
+        rf"\b{_PREV}\b\s*{_ANS}\b\s*([+\-*/])\s*{_NUM}\b",
+    ]
+    for pat in patterns:
+        m = re.search(pat, low)
+        if m:
+            op_word = m.group(1)
+            num = m.group(2) if len(m.groups()) >= 2 else m.group(1)
+            # For the symbol form, group(1) is the symbol and group(2) the number.
+            if op_word in ("+", "-", "*", "/"):
+                operand = float(num.replace(",", ""))
+                op = {"+": "add", "-": "subtract", "*": "multiply", "/": "divide"}[op_word]
+            else:
+                operand = float(num.replace(",", ""))
+                op = {"add": "add", "plus": "add", "subtract": "subtract",
+                      "minus": "subtract", "deduct": "subtract",
+                      "multiply": "multiply", "times": "multiply",
+                      "divide": "divide"}[op_word]
+            break
+    if op is None and has_prev_ref:
+        # Reference present, but is there an operation + number at all?
+        m = re.search(rf"\b(add|plus|subtract|minus|deduct|multiply|times|divide)\b.*?{_NUM}\b", low)
+        if m:
+            op = {"add": "add", "plus": "add", "subtract": "subtract",
+                  "minus": "subtract", "deduct": "subtract",
+                  "multiply": "multiply", "times": "multiply",
+                  "divide": "divide"}[m.group(1)]
+            operand = float(m.group(2).replace(",", ""))
+    if op is None:
+        # Bare continuation while a running calculation is the task:
+        # "add 5" / "plus 5" / "minus 100" after a maths answer.
+        task = getattr(context, "active_task", "") or ""
+        if task.startswith("Running calculation"):
+            m = re.match(r"^(?:now\s+|also\s+|and\s+)?(add|plus|subtract|minus|multiply|times|divide)\s+" + _NUM + r"\s*\.?\s*$", low)
+            if m:
+                op = {"add": "add", "plus": "add", "subtract": "subtract",
+                      "minus": "subtract", "multiply": "multiply",
+                      "times": "multiply", "divide": "divide"}[m.group(1)]
+                operand = float(m.group(2).replace(",", ""))
+    if op is None:
+        return None
+    previous = _previous_number(context)
+    if previous is None:
+        return {"kind": "clarify",
+                "question": ("I want to add that to your previous answer, but I don't "
+                             "have a previous numeric answer in this chat to use — "
+                             "my last answer was not a calculation. Please give me "
+                             "the number to start from, e.g. '564 + 2674'.")}
+    if op == "divide" and operand == 0:
+        return {"kind": "clarify",
+                "question": "I can't divide by zero. What number should I divide "
+                             f"{_fmt(previous)} by instead?"}
+    return {"kind": "math_followup", "previous": previous,
+            "operand": operand, "operation": op,
+            "symbol": {"add": "+", "subtract": "-", "multiply": "×", "divide": "÷"}[op]}
+
+
+def apply_math_followup(resolved):
+    """Compute the follow-up and format it like a normal maths answer."""
+    prev, operand, op = resolved["previous"], resolved["operand"], resolved["operation"]
+    if op == "add":
+        result = prev + operand
+    elif op == "subtract":
+        result = prev - operand
+    elif op == "multiply":
+        result = prev * operand
+    else:
+        result = prev / operand
+    return (f"{_fmt(prev)} {resolved['symbol']} {_fmt(operand)} = {_fmt(result)}\n"
+            f"Answer: {_fmt(result)}\n"
+            f"(Continuing your running total — added to your previous answer, {_fmt(prev)}.)")
+
+
+def resolve_previous_reference(text, context):
+    """Any other 'previous answer' reference, kept out of web search.
+
+    "What was my previous answer?" shows it; any other unhandled
+    previous-answer reference asks what to do with it, naming the
+    last answer, instead of letting the web fallback guess a topic.
+    Returns a dict or None.
+    """
+    low = text.lower().strip()
+    if not re.search(rf"\b{_PREV}\b.*\b{_ANS}\b|\b{_ANS}\b.*\b{_PREV}\b", low):
+        return None
+    bot = getattr(context, "last_main_response", "") or getattr(context, "last_bot_response", "") or ""
+    if not bot:
+        return {"kind": "clarify",
+                "question": "Which previous answer do you mean? I don't have an "
+                             "earlier answer in this chat yet — please ask the "
+                             "question again."}
+    if re.search(r"\b(what was|show|repeat|tell me)\b", low):
+        return {"kind": "show_previous", "answer": f"My previous answer was:\n\n{bot}"}
+    return {"kind": "clarify",
+            "question": (f"Do you mean my previous answer? It was: {bot[:200]}"
+                         "… Tell me what to do with it — for example 'add 100 in "
+                         "previous answer', 'explain it more simply', or 'make it shorter'.")}
+
+
 def _sentences(text):
     parts = re.split(r"(?<=[.!?])\s+", (text or "").strip())
     return [p.strip() for p in parts if p.strip()]

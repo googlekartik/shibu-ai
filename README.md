@@ -202,3 +202,16 @@ Database persistence, user login, voice input/output, RAG over documents, larger
 **Conversation context memory (`services/context_memory.py` + `chatbot/context.py`):** History is still per-session (Flask session id, `ContextStore`, cleared by `/api/clear` and the Clear button — never shared between chats). On top of it, follow-ups now work: `Explain it more simply.`, `Make it shorter.`, `Give me another example.`, `What about the second one?`, `Continue from where you stopped.`, and `it / that topic` references all resolve against the previous real answer (follow-up wrappers never become the new "previous answer", so chains don't degrade). A bare reference with no previous answer, or an ambiguous "second one" with no second example, gets a short clarification question instead of a guess. A genuinely new topic is answered on its own — old context is kept in history but never injected. A compact rolling summary (last 3 topics, ≤500 chars, in `/api/history` as `summary`) keeps long conversations on track without growing the context window. No passwords or keys are stored in memory.
 
 **Pipeline:** message → recent history + summary → follow-up resolution → normal answer (rules/LLM/web, unchanged) → environment analysis appended only when the message actually describes an environment → save message, answer and updated summary to that session.
+
+## 21. Previous-answer memory / running total (2026-10-27)
+
+**The bug:** `564+2674+679+45467+549` answered 49933 correctly, but `add 967464 in privious answer` fell through to UNKNOWN and then to a web search, instead of adding. Cause: Shibu had no memory of its own last numeric result, and no handler for arithmetic on a previous answer.
+
+**The fix — task memory in the chat (`chatbot/context.py`, `services/context_memory.py`, router step 0b):** After a calculation, the session remembers `active_task` ("Running calculation — last result 49933") and `last_numeric_value`, exposed in `/api/history`. A follow-up is now handled before maths, rules and web search, so it can never be web-searched:
+
+- `add 967464 in privious answer` → `49933 + 967464 = 1017397` (also works with "previous", "last", "above", "that" + answer/result/total, and with subtract / multiply / divide, `previous answer + 5`, and a bare `add 5` while a running calculation is the current task).
+- The result becomes the new previous answer, so you can keep chaining: add, subtract, multiply, divide.
+- `What was my previous answer?` shows it.
+- If there is no previous numeric answer (fresh chat, or the last answer was not a calculation), it asks a short clarification question instead of guessing or web-searching.
+- A genuinely new topic replaces the task memory and clears the stale number, so a later "add" cannot silently add to an old total.
+- Only a result that ends an answer ("Answer: 49933", "Next term: 32") counts — a number inside prose, or a derivative like `3*x**2`, is never mistaken for a result.
