@@ -86,6 +86,11 @@ def test_router_falls_back_to_rules_when_llm_off(monkeypatch):
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.delenv("HF_USE_LOCAL", raising=False)
     monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
+    # Isolate the LLM-off path from the live web: "xyzabc" is now a
+    # real TikTok hashtag, so DuckDuckGo returns results and the
+    # (intentional) web fallback would otherwise fire instead.
+    import chatbot.router as router
+    monkeypatch.setattr(router.search_service, "search", lambda q: [])
     out = process_message("some totally unknown topic xyzabc", ConversationContext())
     assert out["intent"] == "UNKNOWN"  # no LLM, so the honest fallback remains
 

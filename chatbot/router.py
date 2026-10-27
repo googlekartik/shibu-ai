@@ -22,6 +22,10 @@ from services.document_service import summarize as summarize_doc, answer_from_do
 from services.file_generation_service import generate_pptx, generate_docx, generate_xlsx
 from services.model_manager import ModelManager
 from services.conversation_manager import build_messages, detect_language
+from services.environment_analyzer import (
+    analyze_environment, format_environment_table, is_explicit_request,
+    should_analyze)
+from services.context_memory import resolve_followup
 from services.response_generator import validate_llm_answer, format_llm_answer
 import os
 from utils.text_processing import normalize_for_matching
@@ -529,6 +533,70 @@ def process_single_message(message: str, context, processing_ms=0.0):
         context.add_exchange(text, payload["response"], "REASONING_SERIES", "series_solver", 0.95)
         return payload
 
+    # 5k) Conversation context memory: follow-ups that refer to the
+    # previous answer ("explain it more simply", "another example",
+    # "the second one", "continue", "it / that topic"). A bare
+    # reference with no previous answer gets a short clarification
+    # question, never a guess. A genuinely new topic is not a
+    # follow-up, so it falls through to the rule engine on its own.
+    _follow = resolve_followup(text, context)
+    if _follow is not None:
+        if _follow["kind"] == "clarify":
+            payload = format_response(text=_follow["question"], intent="CLARIFY",
+                rule_id="clarify_followup", confidence=0.90, tool="Conversation context",
+                action="Ask clarifying question", processing_ms=processing_ms)
+            context.add_exchange(text, payload["response"], "CLARIFY", "clarify_followup", 0.90)
+            return payload
+        if _follow["kind"] == "reference":
+            _rule = match_rule(_follow["topic"])
+            if _rule["intent"] != "UNKNOWN":
+                payload = format_response(text=_rule["response"], intent=_rule["intent"],
+                    rule_id=_rule["rule_id"], confidence=_rule["confidence"],
+                    tool="Rule engine + conversation context",
+                    action="Answer follow-up from previous topic", processing_ms=processing_ms)
+                context.add_exchange(text, payload["response"], _rule["intent"],
+                                     _rule["rule_id"], _rule["confidence"], topic=_follow["topic"])
+                return payload
+            # Fall through: no rule for the old topic, let the normal
+            # pipeline (LLM / web fallback) handle it below.
+        else:
+            payload = format_response(text=_follow["answer"], intent="FOLLOW_UP",
+                rule_id="context_followup_memory", confidence=0.90,
+                tool="Conversation context", action="Answer follow-up from previous answer",
+                processing_ms=processing_ms)
+            context.add_exchange(text, payload["response"], "FOLLOW_UP",
+                                 "context_followup_memory", 0.90, topic=context.last_topic)
+            return payload
+
+    # 5l) AI Environment Properties Analyzer.
+    # Explicit requests ("Classify a self-driving car environment.")
+    # are answered with the table itself. So are scenario +
+    # environment questions whose only rule match would be the
+    # generic "ecosystem" rule or nothing at all (e.g. "Tell me about
+    # a robot navigating a warehouse environment") — otherwise that
+    # unrelated ecosystem answer would sit above the table. For a
+    # scenario question with a genuinely relevant rule answer, the
+    # table is appended after the normal answer by process_message().
+    if is_explicit_request(low) or should_analyze(text):
+        try:
+            _env = analyze_environment(text)
+        except Exception:
+            _env = None
+        if _env is not None:
+            _rule_for_env = match_rule(text)
+            if is_explicit_request(low) or _rule_for_env["intent"] in ("ECOSYSTEM", "UNKNOWN"):
+                payload = format_response(
+                    text=format_environment_table(_env),
+                    intent="ENVIRONMENT_ANALYSIS", rule_id="environment_analysis",
+                    confidence=0.90, tool="Environment analyzer",
+                    action="Classify AI environment properties",
+                    extra={"environment_analysis": _env}, processing_ms=processing_ms)
+                context.add_exchange(text, payload["response"], "ENVIRONMENT_ANALYSIS",
+                                     "environment_analysis", 0.90)
+                return payload
+        # Analyzer failure must not hide the normal answer: fall
+        # through to the rule engine / web fallback below.
+
     # 6) Rule engine, with the LLM as a labelled fallback for UNKNOWN or
     # low-confidence answers only. High-confidence rule answers, maths,
     # search, documents and files above are never replaced by the model.
@@ -583,4 +651,31 @@ def process_message(message: str, context, processing_ms=0.0):
                 processing_ms=processing_ms)
             context.add_exchange(text, combined["response"], "MULTI_STEP", "multi_step", 0.90)
             return combined
-    return process_single_message(message, context, processing_ms)
+    payload = process_single_message(message, context, processing_ms)
+    # Environment table, appended AFTER a normal answer, only when the
+    # message actually describes an environment scenario (see
+    # should_analyze). Explicit classify requests were already
+    # answered with a table in step 5l, so they are not doubled here.
+    # Analyzer failure is swallowed: the normal answer still stands.
+    if "environment_analysis" not in payload:
+        _skip = {"MATHEMATICS", "MATHEMATICS_STEP_BY_STEP", "PDF_GENERATION",
+                 "FILE_GENERATION", "CODE_GENERATION", "CODE_DEBUG", "CODE_RUN",
+                 "COMPARE", "DOCUMENT", "DOCUMENT_SUMMARY", "DOCUMENT_NOTES",
+                 "DOCUMENT_ANALYSIS", "DOCUMENT_QA", "PREFERENCE", "CLARIFY"}
+        if payload.get("intent") not in _skip:
+            try:
+                _env = analyze_environment(message)
+            except Exception:
+                _env = None
+            if _env is not None:
+                payload["response"] = payload["response"] + "\n\n" + format_environment_table(_env)
+                payload["environment_analysis"] = _env
+                # Keep the saved session history consistent with what
+                # the user actually saw.
+                try:
+                    if context.conversation_history and context.conversation_history[-1].get("role") == "bot":
+                        context.conversation_history[-1]["text"] = payload["response"]
+                    context.last_bot_response = payload["response"]
+                except Exception:
+                    pass
+    return payload

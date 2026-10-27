@@ -46,6 +46,34 @@ function addMessage(text, role, extra, saveHistory = true) {
   const body = document.createElement("div");
   body.textContent = text;
   div.appendChild(body);
+  // AI Environment Properties: rendered as a separate table below the
+  // main answer (never mixed into it), when the server classified a
+  // scenario. The text version is already in the message for copy /
+  // API clients; this table is the readable UI section.
+  if (role === "bot" && extra && extra.environment_analysis) {
+    const env = extra.environment_analysis;
+    const wrap = document.createElement("div");
+    wrap.className = "env-table";
+    const title = document.createElement("div");
+    title.className = "env-title";
+    title.textContent = "AI Environment Properties — " + (env.scenario || "");
+    wrap.appendChild(title);
+    const table = document.createElement("table");
+    const head = document.createElement("tr");
+    ["Property", "Classification", "Reason"].forEach(h => {
+      const th = document.createElement("th"); th.textContent = h; head.appendChild(th);
+    });
+    table.appendChild(head);
+    (env.properties || []).forEach(p => {
+      const tr = document.createElement("tr");
+      [p.property, p.classification, p.reason].forEach(v => {
+        const td = document.createElement("td"); td.textContent = v; tr.appendChild(td);
+      });
+      table.appendChild(tr);
+    });
+    wrap.appendChild(table);
+    div.appendChild(wrap);
+  }
   if (role === "bot") {
     const tools = document.createElement("div");
     tools.className = "tools";
