@@ -25,6 +25,9 @@ from services.document_service import extract_text, summarize as summarize_doc, 
 from services.file_generation_service import generate_pptx, generate_docx, generate_xlsx
 from services.cache_service import (cached_answer_lookup, cached_answer_store,
                                     looks_personal, normalize_query)
+from services.rag_config import get_rag_config
+from services.rag_service import RAGService
+from services.sqlite_store import SQLiteStore
 from services.math_service import looks_like_math
 from chatbot.rule_engine import match_rule
 from services.google_auth import (build_authorization_url, exchange_code,
@@ -57,6 +60,48 @@ def _session_id():
 
 def _context():
     return contexts.get(_session_id())
+
+
+_RAG_CACHE = {}
+
+
+def _sqlite_store():
+    path = get_rag_config().get("sqlite_path")
+    if path not in _RAG_CACHE:
+        _RAG_CACHE[path] = SQLiteStore(path=path)
+    return _RAG_CACHE[path]
+
+
+def _rag_service():
+    # Share the app's single SQLite connection with RAGService:
+    # two connections to the same file caused "database is locked"
+    # in tests. One connection per process, sequential Flask use.
+    key = ("rag", get_rag_config().get("sqlite_path"))
+    if key not in _RAG_CACHE:
+        _RAG_CACHE[key] = RAGService(sqlite_store=_sqlite_store())
+    return _RAG_CACHE[key]
+
+
+def _save_chat_to_sqlite(user_message, payload):
+    """Persistent chat history for logged-in users only, one
+    conversation per Flask session. Anonymous chat is never saved
+    to SQLite (no user_id to scope it to)."""
+    user_id = _session_user_id()
+    if not user_id:
+        return
+    try:
+        store = _sqlite_store()
+        store.get_or_create_user(user_id)
+        conv_id = session.get("sqlite_conversation_id")
+        if not conv_id:
+            conv_id = store.create_conversation(user_id, title=user_message[:80])
+            session["sqlite_conversation_id"] = conv_id
+        store.save_message(user_id, conv_id, "user", user_message)
+        store.save_message(user_id, conv_id, "bot", payload.get("response", ""),
+                           intent=payload.get("intent", ""), rule_id=payload.get("rule_id", ""),
+                           sources=payload.get("sources", []))
+    except Exception:
+        logger.exception("SQLite chat save failed (chat still returned)")
 
 
 def _session_user_id():
@@ -93,12 +138,11 @@ def _avatar_url(avatar_id):
 
 
 def _profile():
-    """Logged-in profile, from the Flask session only. It remembers
-    the profile in this browser; there is no server database any
-    more, so it does not carry across devices. Server-side
-    authorisation: the user_id always comes from the session, never
-    from a request body, so a user can only read or change their
-    own profile."""
+    """Logged-in profile, from the session merged with the SQLite
+    user row (same host only; SQLite on Render free is ephemeral).
+    Server-side authorisation: the user_id always comes from the
+    session, never from a request body, so a user can only read or
+    change their own profile."""
     user_id = _session_user_id()
     if not user_id:
         return {"logged_in": False, "user_id": None, "display_name": "",
@@ -109,6 +153,17 @@ def _profile():
                "avatar_id": session.get("profile_avatar_id"),
                "onboarding_completed": bool(session.get("onboarding_completed")),
                "onboarding_stage": session.get("onboarding_stage")}
+    try:
+        user = _sqlite_store().get_or_create_user(user_id)
+        if user.get("avatar_id") in AVATAR_IDS:
+            profile["avatar_id"] = user["avatar_id"]
+        if user.get("display_name"):
+            profile["display_name"] = user["display_name"]
+        if user.get("onboarding_completed"):
+            profile["onboarding_completed"] = True
+            profile["onboarding_stage"] = None
+    except Exception:
+        pass
     if profile["avatar_id"] not in AVATAR_IDS:
         profile["avatar_id"] = None
     if not profile["onboarding_completed"] and not profile["onboarding_stage"]:
@@ -119,7 +174,9 @@ def _profile():
 
 def _save_profile(display_name=None, avatar_id=None, onboarding_completed=None,
                   onboarding_stage=None):
-    """Save to the session only. Returns the fresh profile."""
+    """Save to the session and to SQLite (logged-in users only).
+    SQLite is the persistent profile store on this host; the
+    session alone would lose it when the browser session ends."""
     user_id = _session_user_id()
     if display_name is not None:
         session["google_display_name"] = display_name
@@ -129,6 +186,13 @@ def _save_profile(display_name=None, avatar_id=None, onboarding_completed=None,
         session["onboarding_completed"] = bool(onboarding_completed)
     if onboarding_stage is not None:
         session["onboarding_stage"] = onboarding_stage
+    if user_id:
+        try:
+            _sqlite_store().update_user(user_id, display_name=display_name,
+                                        avatar_id=avatar_id,
+                                        onboarding_completed=onboarding_completed)
+        except Exception:
+            pass
     return _profile()
 
 
@@ -239,6 +303,44 @@ def chat():
             return jsonify(payload)
         if profile["onboarding_stage"] == "ask_goal":
             _save_profile(onboarding_completed=True, onboarding_stage=None)
+    # RAG attempt, AFTER onboarding and BEFORE the cache/router:
+    # rules and maths keep priority (see below: RAG only runs when
+    # the rule match is UNKNOWN / low-confidence, or the user
+    # explicitly asks about their documents). If RAG finds evidence
+    # above threshold, it answers with sources. If it finds nothing
+    # for a document question, say so — do not web-search a private
+    # document question. Otherwise fall through to the normal pipeline.
+    if profile["logged_in"]:
+        _low = message_or_error.lower()
+        _forced_doc = any(p in _low for p in ("my document", "my file", "uploaded", "in my document", "from my document"))
+        try:
+            _rule_rag = match_rule(message_or_error)
+        except Exception:
+            _rule_rag = {"intent": "UNKNOWN", "confidence": 0.0}
+        if (_forced_doc or _rule_rag.get("intent") == "UNKNOWN" or _rule_rag.get("rule_id") == "definition"
+                or float(_rule_rag.get("confidence") or 0) < 0.45):
+            try:
+                _rag = _rag_service().rag_answer(_session_user_id(), message_or_error)
+            except Exception:
+                _rag = {"evidence_found": False, "error": "RAG unavailable"}
+            if _rag.get("evidence_found") and not _rag.get("error"):
+                _payload = {"response": _rag["answer"], "intent": "RAG_ANSWER",
+                            "rule_id": "rag_answer", "confidence": 0.85,
+                            "confidence_label": "HIGH", "tool": "Pinecone RAG" if _rag["backend"] == "pinecone" else "SQLite fallback RAG",
+                            "action": "Answer from your documents", "sources": _rag["sources"],
+                            "backend": _rag["backend"], "processing_ms": round(timer.elapsed_ms(), 1)}
+                ctx.add_exchange(message_or_error, _payload["response"], "RAG_ANSWER", "rag_answer", 0.85)
+                _save_chat_to_sqlite(message_or_error, _payload)
+                return jsonify(_payload)
+            if _forced_doc and not _rag.get("evidence_found"):
+                _payload = {"response": "I searched your documents but did not find passages that answer that question. Try rephrasing with words from the document, or upload the document first with /api/rag/ingest.",
+                            "intent": "RAG_NO_EVIDENCE", "rule_id": "rag_no_evidence", "confidence": 0.90,
+                            "confidence_label": "HIGH", "tool": "Pinecone RAG" if _rag.get("backend") == "pinecone" else "SQLite fallback RAG",
+                            "action": "No relevant document evidence", "sources": [],
+                            "backend": _rag.get("backend"), "processing_ms": round(timer.elapsed_ms(), 1)}
+                ctx.add_exchange(message_or_error, _payload["response"], "RAG_NO_EVIDENCE", "rag_no_evidence", 0.90)
+                _save_chat_to_sqlite(message_or_error, _payload)
+                return jsonify(_payload)
     # In-memory cache, before the (slow) web search: only for
     # questions with no rule and no maths, so a rule/math answer is
     # never replaced by a cached web answer. Personal queries are
@@ -284,6 +386,7 @@ def chat():
                     tool=payload.get("tool", "web"))
             except Exception:
                 pass
+        _save_chat_to_sqlite(message_or_error, payload)
         return jsonify(payload)
     except Exception as exc:
         logger.exception("Chat failed")
@@ -470,7 +573,11 @@ def google_callback():
     session["google_display_name"] = claims.get("name", "")
     session["google_email"] = claims.get("email", "")
     session.pop("google_oauth_state", None)
-    # Login is a session identity only: no database user is created.
+    # Persistent SQLite user (profile + history), scoped by google#sub.
+    try:
+        _sqlite_store().get_or_create_user(user_id, display_name=claims.get("name", ""))
+    except Exception:
+        pass
     # First-time flow: no avatar yet -> avatar selection. Returning
     # users with a saved avatar (and completed onboarding) go straight
     # to chat, and are never asked to choose again.
@@ -485,6 +592,7 @@ def google_logout():
     session.pop("google_user_id", None)
     session.pop("google_display_name", None)
     session.pop("google_email", None)
+    session.pop("sqlite_conversation_id", None)
     session.pop("profile_avatar_id", None)
     session.pop("onboarding_completed", None)
     session.pop("onboarding_stage", None)
@@ -551,6 +659,133 @@ def onboarding_status():
     return jsonify({"logged_in": True, "needs_welcome": True,
                     "welcome_message": "Hi! Welcome! What should I call you?",
                     "quick_actions": [], "profile": profile})
+
+
+
+@app.route("/api/rag/status")
+def rag_status():
+    return jsonify(_rag_service().status(user_id=_session_user_id()))
+
+
+@app.route("/api/rag/ingest", methods=["POST"])
+def rag_ingest():
+    """Ingest a document for RAG. Login required; the document
+    belongs to the session user_id only. Accepts a file upload
+    (PDF/DOCX/XLSX/TXT/MD/HTML/CSV, reusing document extraction)
+    or JSON {"text": ..., "source_name": ...}. On failure the
+    document is marked failed in SQLite so it can be re-indexed."""
+    user_id = _session_user_id()
+    if not user_id:
+        return jsonify({"error": "Please sign in first."}), 401
+    try:
+        if "file" in request.files and request.files["file"].filename:
+            f = request.files["file"]
+            ext = os.path.splitext(f.filename)[1].lower()
+            upload_dir = os.path.join(BASE_DIR, "uploads")
+            os.makedirs(upload_dir, exist_ok=True)
+            safe_name = sanitize_filename(f.filename)
+            path = os.path.join(upload_dir, safe_name)
+            f.save(path)
+            result = _rag_service().ingest_file(user_id, path, safe_name)
+            return jsonify(result)
+        data = request.get_json(silent=True) or {}
+        text = (data.get("text") or "").strip()
+        source_name = (data.get("source_name") or "pasted-text.txt").strip()
+        if not text:
+            return jsonify({"error": "Provide a file or JSON text + source_name."}), 400
+        return jsonify(_rag_service().ingest_text(user_id, source_name, text))
+    except Exception as exc:
+        logger.exception("RAG ingest failed")
+        return jsonify({"error": str(exc)[:300]}), 400
+
+
+@app.route("/api/rag/search", methods=["POST"])
+def rag_search():
+    """Semantic search over the caller's own documents only.
+    Login required; the namespace/user filter is the session id,
+    never a body-supplied user_id."""
+    user_id = _session_user_id()
+    if not user_id:
+        return jsonify({"error": "Please sign in first."}), 401
+    data = request.get_json(silent=True) or {}
+    query = (data.get("q") or data.get("query") or "").strip()
+    if not query:
+        return jsonify({"error": "Provide q."}), 400
+    try:
+        top_k = int(data.get("top_k", 5))
+    except Exception:
+        top_k = 5
+    try:
+        hits = _rag_service().search(user_id, query, top_k=top_k)
+    except Exception as exc:
+        return jsonify({"error": str(exc)[:300], "backend": get_rag_config()["backend"]}), 502
+    return jsonify({"query": query, "results": hits, "backend": get_rag_config()["backend"]})
+
+
+@app.route("/api/rag/documents")
+def rag_documents():
+    user_id = _session_user_id()
+    if not user_id:
+        return jsonify({"error": "Please sign in first."}), 401
+    return jsonify({"documents": _sqlite_store().list_documents(user_id)})
+
+
+@app.route("/api/rag/documents/<document_id>", methods=["DELETE"])
+def rag_delete_document(document_id):
+    user_id = _session_user_id()
+    if not user_id:
+        return jsonify({"error": "Please sign in first."}), 401
+    try:
+        deleted = _rag_service().delete_document(user_id, document_id)
+    except Exception as exc:
+        return jsonify({"error": str(exc)[:300]}), 502
+    if not deleted:
+        return jsonify({"error": "Document not found."}), 404
+    return jsonify({"status": "deleted", "document_id": document_id})
+
+
+@app.route("/api/rag/documents/<document_id>/reindex", methods=["POST"])
+def rag_reindex_document(document_id):
+    user_id = _session_user_id()
+    if not user_id:
+        return jsonify({"error": "Please sign in first."}), 401
+    try:
+        return jsonify(_rag_service().reindex_document(user_id, document_id))
+    except Exception as exc:
+        return jsonify({"error": str(exc)[:300]}), 400
+
+
+@app.route("/api/conversations")
+def list_conversations():
+    user_id = _session_user_id()
+    if not user_id:
+        return jsonify({"error": "Please sign in first."}), 401
+    return jsonify({"conversations": _sqlite_store().list_conversations(user_id)})
+
+
+@app.route("/api/conversations/<conversation_id>/messages")
+def list_conversation_messages(conversation_id):
+    user_id = _session_user_id()
+    if not user_id:
+        return jsonify({"error": "Please sign in first."}), 401
+    return jsonify({"messages": _sqlite_store().list_messages(user_id, conversation_id)})
+
+
+@app.route("/api/history/migrate", methods=["POST"])
+def migrate_history():
+    """EXPLICIT migration only: localStorage/session history is
+    never migrated automatically. Send {"confirm": true,
+    "exchanges": [{"role": "user"|"bot", "text": ...}]}. Without
+    confirm=true, nothing is migrated."""
+    user_id = _session_user_id()
+    if not user_id:
+        return jsonify({"error": "Please sign in first."}), 401
+    data = request.get_json(silent=True) or {}
+    if data.get("confirm") is not True:
+        return jsonify({"migrated": 0, "conversation_id": None,
+                        "note": "Send confirm=true to migrate explicitly."})
+    result = _sqlite_store().migrate_session_history(user_id, data.get("exchanges") or [], confirm=True)
+    return jsonify(result)
 
 
 @app.errorhandler(404)

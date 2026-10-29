@@ -7,3 +7,4 @@ uploads/
 *.pyc
 .pytest_cache/
 .DS_Store
+data/

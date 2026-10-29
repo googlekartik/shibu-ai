@@ -13,3 +13,6 @@ python-pptx>=0.6.21
 # Optional: faster / more reliable DuckDuckGo search. The app works without it.
 ddgs>=9.0; python_version >= "3.9"
 pytest>=8.0
+# Pinecone RAG (optional, production only): the app runs without it
+# on the SQLite fallback. Install only when a Pinecone index exists.
+pinecone>=9.0

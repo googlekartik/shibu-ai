@@ -263,3 +263,91 @@ Built on the existing stack — Python/Flask, Google OAuth (`google#sub` as the 
 - **Chat UI** (`templates/index.html`, `static/js/app.js`, `static/css/style.css`): the header shows the selected avatar beside "Signed in as [Name]"; a collapsible "Chats" sidebar replaces the old History panel (this browser's history; "+ New chat" starts fresh); quick-action pills appear under the welcome-goal message only.
 - **Authorisation**: every profile, avatar, conversation and message query is scoped to the session user_id. No user can read or change another user's profile by sending a different ID — the ID is never taken from a request body.
 - **Test it locally**: sign in with Google, choose an avatar, answer the name question, pick a quick action, then sign out and back in — you should land straight on chat with your avatar and name, no avatar page and no welcome question. Verified 2026-10-29: 100 pytest passed (94 previous + 6 new in `tests/test_onboarding_avatar_2026.py`), live Flask checks for `/`, `/login`, `/avatar` (302 when logged out), `/api/avatars`, `/static/avatars/avatar-3.svg` and anonymous `/api/chat` all passed. No GitHub push was made for this batch — it waits for a new "merge" word, per the standing rule.
+
+## 26. Pinecone-backed RAG + SQLite persistent store (2026-10-30, local only — NOT pushed to GitHub)
+
+Stage 1 inspection result, stated plainly: in this workspace
+PINECONE_API_KEY and PINECONE_INDEX_NAME are both absent, so live
+Pinecone validation is BLOCKED here — it is not reported as
+successful. The code below was built and tested on the SQLite
+fallback; live Pinecone will be validated by /api/rag/status the
+moment the variables are set on a host (see below). No index was
+created, changed, or deleted, and no paid usage was incurred.
+
+- **Config** (`services/rag_config.py`): env only, never printed.
+  PINECONE_API_KEY, PINECONE_INDEX_NAME, PINECONE_INDEX_TYPE
+  (dense|integrated), EMBEDDING_PROVIDER (openai|pinecone),
+  EMBEDDING_MODEL (default text-embedding-3-small, 1536 dims),
+  RAG_BACKEND (auto|pinecone|sqlite), RAG_TOP_K (5),
+  RAG_MIN_SCORE (0.30), RAG_CHUNK_SIZE (800),
+  RAG_CHUNK_OVERLAP (100), SHIBU_SQLITE_PATH. Namespace is one
+  per Google sub: google#123 -> user-123, never a display name.
+- **Index-type API** (`services/vector_store.py`, pinecone SDK
+  10.x): dense indexes use upsert(vectors)/query(vector);
+  integrated indexes use upsert_records(text)/search(inputs).
+  describe() reads dimension/metric only; validate_index_info()
+  fails on a dimension mismatch with a migration message (new
+  index + re-index, owner approval required) — it never upserts
+  wrong-dimension vectors and never changes the index.
+- **Embeddings** (`services/embeddings.py`): OpenAI embeddings
+  API or Pinecone Inference, env keys only. No provider/key means
+  embed() raises and Pinecone RAG is blocked — no fake vectors
+  are ever upserted. The SQLite fallback uses token-overlap
+  retrieval, labelled sqlite_fallback, not embeddings.
+- **Chunking** (`services/chunking.py`): configurable size/
+  overlap, stable chunk IDs = hash(document_id, chunk_index,
+  chunk text). Re-ingesting the same text overwrites the same
+  IDs (duplicate prevention); replacement deletes by document_id
+  first, then re-ingests.
+- **SQLite** (`services/sqlite_store.py`, stdlib, file
+  data/shibu.db by default, gitignored): users, documents,
+  document_chunks, conversations, messages — all filtered by
+  google#sub. Limit: on Render free the file is ephemeral and
+  can be wiped on redeploy; on a PC it persists. Pinecone
+  vectors survive a redeploy, SQLite metadata does not on free
+  Render — re-indexing restores it.
+- **Endpoints** (all user-scoped, session id only):
+  GET /api/rag/status (config + live Pinecone state, no secrets),
+  POST /api/rag/ingest (file PDF/DOCX/XLSX/TXT/MD/HTML/CSV reusing
+  document extraction, or JSON text), POST /api/rag/search,
+  GET /api/rag/documents, DELETE /api/rag/documents/<id>,
+  POST /api/rag/documents/<id>/reindex, GET /api/conversations,
+  GET /api/conversations/<id>/messages, POST /api/history/migrate.
+  Ingestion and search return 401 when logged out; document
+  delete/search for another user returns 404/[] respectively.
+- **Chat RAG** (`app.py` /api/chat): after onboarding, before
+  the cache/router. Rules and maths keep priority; RAG runs
+  only when the rule is UNKNOWN, low-confidence, the generic
+  definition fallback, or the user explicitly asks about their
+  documents. Above threshold it returns a grounded answer with
+  sources (LLM with evidence, or retrieved passages directly
+  when no LLM is enabled). For a document question with no
+  evidence it returns RAG_NO_EVIDENCE instead of web-searching
+  a private document. Otherwise it falls through to the normal
+  pipeline, which still uses DuckDuckGo for current/external
+  questions. Logged-in chats are also saved to SQLite
+  conversations/messages.
+- **Migration**: localStorage/session history is NEVER migrated
+  automatically. Only POST /api/history/migrate with
+  {"confirm": true, "exchanges": [...]} migrates, and tests
+  cover both the no-confirm (0 migrated) and confirm branches.
+- **To enable live Pinecone**: set PINECONE_API_KEY,
+  PINECONE_INDEX_NAME, and PINECONE_INDEX_TYPE in .env locally
+  or Render Environment (never in chat/git/frontend), restart,
+  then check GET /api/rag/status — it should say
+  live_pinecone ok with the index dimension matching the
+  embedding model, or a specific mismatch/migration message.
+  If the index is integrated, set PINECONE_INDEX_TYPE=integrated
+  and EMBEDDING_MODEL is ignored. Do not set RAG_BACKEND=pinecone
+  until status says ok, or chat RAG will report blocked and
+  fall through to rules/web.
+- **Tests**: 85 pytest passed (76 previous + 9 new in
+  tests/test_rag_2026.py: chunking stable IDs, namespace,
+  dimension-mismatch migration, dense vs integrated API
+  selection with fake indexes, status blocked, ingest/search/
+  delete/reindex/isolation, RAG chat with sources, empty
+  result, rules-win, anonymous 401, explicit migration +
+  persistence). Live Flask: / and /login 200, /api/rag/status
+  200 (backend sqlite, pinecone_configured false), anonymous
+  /api/rag/search 401, anonymous /api/chat rule answer 200.
+  No fine-tuning was run, per this task.

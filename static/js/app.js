@@ -26,7 +26,16 @@ async function renderHistory() {
     const saved = JSON.parse(localStorage.getItem("rb_chat_history") || "[]");
     questions = saved.filter(m => m.role === "user").map(m => m.text);
   } catch (e) {}
-  // This browser's history only — there is no server database.
+  // Logged-in users: try the persistent SQLite conversation list
+  // first, then fall back to this browser's history.
+  try {
+    const res = await fetch("/api/conversations");
+    if (res.ok) {
+      const data = await res.json();
+      const titles = (data.conversations || []).map(c => c.title).filter(Boolean);
+      if (titles.length) questions = titles;
+    }
+  } catch (e) {}
   // Most recent first, duplicates removed, last 20.
   const unique = [...new Set(questions.reverse())].slice(0, 20);
   empty.style.display = unique.length ? "none" : "block";
