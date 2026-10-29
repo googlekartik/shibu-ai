@@ -1,9 +1,7 @@
 """Onboarding + avatar tests (2026): profile is user-scoped, avatar
 choices are validated, first-time welcome runs once, and returning
-users skip it. No DynamoDB, no Google, no network: the Flask session
-is set directly, which is exactly the fallback path used without
-DynamoDB, and the same code path DynamoDB users go through for the
-session fields."""
+users skip it. No database, no Google, no network: the Flask session
+is set directly, which is exactly how the app stores a profile."""
 import os
 import sys
 

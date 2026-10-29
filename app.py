@@ -23,15 +23,13 @@ from services.pdf_service import PDFService
 from services.web_search_service import WebSearchService
 from services.document_service import extract_text, summarize as summarize_doc, answer_from_document
 from services.file_generation_service import generate_pptx, generate_docx, generate_xlsx
-from services.dynamodb_store import get_store, google_user_id
-from services.usage import get_usage, is_admin
-from services.supabase_search import search_good_answers, sync_learning_pending
 from services.cache_service import (cached_answer_lookup, cached_answer_store,
                                     looks_personal, normalize_query)
 from services.math_service import looks_like_math
 from chatbot.rule_engine import match_rule
 from services.google_auth import (build_authorization_url, exchange_code,
-                                  google_config, new_state, verify_id_token)
+                                  google_config, google_user_id, new_state,
+                                  verify_id_token)
 from utils.security import sanitize_filename
 from utils.logger import Timer, get_logger, log_chat
 from utils.security import MAX_PDF_TEXT_LENGTH, validate_message
@@ -61,20 +59,10 @@ def _context():
     return contexts.get(_session_id())
 
 
-def _dynamodb_user_id():
+def _session_user_id():
     """Logged-in Google user ID from the session, or None. Never
     trust a user_id sent in a request body — the session is the source."""
     return session.get("google_user_id")
-
-
-def _dynamodb_store():
-    """DynamoDB store, or None when disabled / unavailable. Callers
-    must always handle None (in-memory mode) and must never let a
-    DynamoDB failure break a chat response."""
-    try:
-        return get_store()
-    except Exception:
-        return None
 
 
 # Onboarding avatars: illustrated assets in static/avatars/. The first
@@ -105,13 +93,13 @@ def _avatar_url(avatar_id):
 
 
 def _profile():
-    """Logged-in profile, from DynamoDB when enabled, else the Flask
-    session. Session is the fallback only: it remembers the profile in
-    this browser, while DynamoDB is what carries it across devices.
-    Server-side authorisation: the user_id always comes from the
-    session, never from a request body, so a user can only read or
-    change their own profile."""
-    user_id = _dynamodb_user_id()
+    """Logged-in profile, from the Flask session only. It remembers
+    the profile in this browser; there is no server database any
+    more, so it does not carry across devices. Server-side
+    authorisation: the user_id always comes from the session, never
+    from a request body, so a user can only read or change their
+    own profile."""
+    user_id = _session_user_id()
     if not user_id:
         return {"logged_in": False, "user_id": None, "display_name": "",
                 "avatar_id": None, "avatar_url": "/static/shibu.png",
@@ -121,20 +109,6 @@ def _profile():
                "avatar_id": session.get("profile_avatar_id"),
                "onboarding_completed": bool(session.get("onboarding_completed")),
                "onboarding_stage": session.get("onboarding_stage")}
-    store = _dynamodb_store()
-    if store:
-        try:
-            user = store.get_user(user_id)
-        except Exception:
-            user = None
-        if user:
-            if user.get("avatar_id") in AVATAR_IDS:
-                profile["avatar_id"] = user["avatar_id"]
-            if user.get("display_name"):
-                profile["display_name"] = user["display_name"]
-            if user.get("onboarding_completed"):
-                profile["onboarding_completed"] = True
-                profile["onboarding_stage"] = None
     if profile["avatar_id"] not in AVATAR_IDS:
         profile["avatar_id"] = None
     if not profile["onboarding_completed"] and not profile["onboarding_stage"]:
@@ -145,9 +119,8 @@ def _profile():
 
 def _save_profile(display_name=None, avatar_id=None, onboarding_completed=None,
                   onboarding_stage=None):
-    """Save to the session always, and to DynamoDB best-effort when
-    enabled. Returns the fresh profile."""
-    user_id = _dynamodb_user_id()
+    """Save to the session only. Returns the fresh profile."""
+    user_id = _session_user_id()
     if display_name is not None:
         session["google_display_name"] = display_name
     if avatar_id is not None:
@@ -156,42 +129,7 @@ def _save_profile(display_name=None, avatar_id=None, onboarding_completed=None,
         session["onboarding_completed"] = bool(onboarding_completed)
     if onboarding_stage is not None:
         session["onboarding_stage"] = onboarding_stage
-    if user_id:
-        store = _dynamodb_store()
-        if store:
-            try:
-                store.update_profile(user_id, display_name=display_name,
-                                     avatar_id=avatar_id,
-                                     onboarding_completed=onboarding_completed)
-            except Exception:
-                logger.exception("DynamoDB profile save failed (session kept)")
     return _profile()
-
-
-def _save_chat_to_dynamodb(user_message, payload, ctx):
-    """Best-effort persistence after a chat answer. One conversation
-    per Flask session; a failure here is logged and ignored."""
-    store = _dynamodb_store()
-    user_id = _dynamodb_user_id()
-    if not store or not user_id:
-        return
-    try:
-        conv_id = session.get("dynamodb_conversation_id")
-        if not conv_id:
-            conv = store.create_conversation(user_id, title=user_message)
-            conv_id = conv["conversation_id"]
-            session["dynamodb_conversation_id"] = conv_id
-        store.save_exchange(
-            user_id, conv_id, user_message, payload.get("response", ""),
-            intent=payload.get("intent", ""), rule_id=payload.get("rule_id", ""),
-            confidence=float(payload.get("confidence") or 0.0),
-            tool=payload.get("tool", ""))
-        store.update_conversation_metadata(
-            user_id, conv_id, summary=ctx.summary, active_task=ctx.active_task,
-            last_numeric_answer=ctx.last_numeric_value,
-            last_topic=ctx.last_topic, last_intent=ctx.last_intent)
-    except Exception:
-        logger.exception("DynamoDB chat save failed (chat still returned)")
 
 
 @app.route("/")
@@ -298,23 +236,22 @@ def chat():
                        "confidence": 1.0, "confidence_label": "HIGH",
                        "tool": "Onboarding", "action": "Ask first goal",
                        "quick_actions": QUICK_ACTIONS}
-            _save_chat_to_dynamodb(message_or_error, payload, ctx)
             return jsonify(payload)
         if profile["onboarding_stage"] == "ask_goal":
             _save_profile(onboarding_completed=True, onboarding_stage=None)
-    # Step 5 cache, before the (slow) web search: only for questions
-    # with no rule and no maths, so a rule/math answer is never
-    # replaced by a cached web answer. Personal queries are never cached.
-    store_for_cache = _dynamodb_store()
+    # In-memory cache, before the (slow) web search: only for
+    # questions with no rule and no maths, so a rule/math answer is
+    # never replaced by a cached web answer. Personal queries are
+    # never cached. This cache lives only in this process (5 min).
     normalized = normalize_query(message_or_error)
-    if (store_for_cache is not None and normalized and not looks_personal(message_or_error)
+    if (normalized and not looks_personal(message_or_error)
             and not looks_like_math(message_or_error)):
         try:
             rule_for_cache = match_rule(message_or_error)
         except Exception:
             rule_for_cache = {"intent": "UNKNOWN"}
         if rule_for_cache.get("intent") == "UNKNOWN":
-            hit = cached_answer_lookup(store_for_cache, normalized)
+            hit = cached_answer_lookup(normalized)
             if hit:
                 ctx.add_exchange(message_or_error, hit["summary"],
                                  "WEB_SEARCH", "cached_web_answer", 0.85)
@@ -325,7 +262,6 @@ def chat():
                     "action": "Answer from cache", "sources": hit.get("sources", []),
                     "cached": True, "processing_ms": round(timer.elapsed_ms(), 1),
                 }
-                _save_chat_to_dynamodb(message_or_error, payload, ctx)
                 return jsonify(payload)
     try:
         payload = process_message(message_or_error, ctx, processing_ms=0.0)
@@ -336,19 +272,18 @@ def chat():
         # the API cost and could double the answer.
         log_chat(logger, payload["intent"], payload["rule_id"],
                  payload["confidence"], payload["tool"], payload["processing_ms"])
-        # Step 5 cache, after a successful web answer: store it for
-        # the next identical question (summary only, max 5 sources).
-        if (store_for_cache is not None and payload.get("intent") == "WEB_SEARCH"
+        # In-memory cache, after a successful web answer: store it
+        # for the next identical question (summary only, max 5 sources).
+        if (payload.get("intent") == "WEB_SEARCH"
                 and float(payload.get("confidence") or 0) >= 0.85
                 and not looks_personal(message_or_error)):
             try:
                 cached_answer_store(
-                    store_for_cache, normalized, message_or_error,
-                    payload.get("response", ""), payload.get("search_results", []),
+                    normalized, payload.get("response", ""),
+                    payload.get("search_results", []),
                     tool=payload.get("tool", "web"))
             except Exception:
                 pass
-        _save_chat_to_dynamodb(message_or_error, payload, ctx)
         return jsonify(payload)
     except Exception as exc:
         logger.exception("Chat failed")
@@ -484,14 +419,6 @@ def preferences():
             ctx.preferences["tone"] = data["tone"]
         if data.get("level") in ("normal", "beginner", "expert"):
             ctx.preferences["level"] = data["level"]
-        # Best-effort: also persist preferences for logged-in users.
-        store = _dynamodb_store()
-        user_id = _dynamodb_user_id()
-        if store and user_id:
-            try:
-                store.set_preferences(user_id, ctx.preferences["tone"], ctx.preferences["level"])
-            except Exception:
-                logger.exception("DynamoDB preferences save failed (in-memory kept)")
     return jsonify(ctx.preferences)
 
 
@@ -543,16 +470,7 @@ def google_callback():
     session["google_display_name"] = claims.get("name", "")
     session["google_email"] = claims.get("email", "")
     session.pop("google_oauth_state", None)
-    # Create the DynamoDB user on first login, if DynamoDB is enabled.
-    # Without DynamoDB, login still works as a session identity.
-    store = _dynamodb_store()
-    if store:
-        try:
-            store.get_or_create_user(user_id, display_name=claims.get("name", ""),
-                                     email=claims.get("email", ""),
-                                     google_sub=claims["sub"])
-        except Exception:
-            logger.exception("DynamoDB user creation failed (login still succeeded)")
+    # Login is a session identity only: no database user is created.
     # First-time flow: no avatar yet -> avatar selection. Returning
     # users with a saved avatar (and completed onboarding) go straight
     # to chat, and are never asked to choose again.
@@ -567,7 +485,6 @@ def google_logout():
     session.pop("google_user_id", None)
     session.pop("google_display_name", None)
     session.pop("google_email", None)
-    session.pop("dynamodb_conversation_id", None)
     session.pop("profile_avatar_id", None)
     session.pop("onboarding_completed", None)
     session.pop("onboarding_stage", None)
@@ -576,9 +493,7 @@ def google_logout():
 
 @app.route("/api/me")
 def me():
-    profile = _profile()
-    profile["dynamodb_enabled"] = _dynamodb_store() is not None
-    return jsonify(profile)
+    return jsonify(_profile())
 
 
 @app.route("/avatar")
@@ -586,7 +501,7 @@ def avatar_page():
     """Avatar selection, also used later from the chat header to
     change an avatar. Login is required: the avatar belongs to the
     authenticated user_id in the session, never to a request body."""
-    if not _dynamodb_user_id():
+    if not _session_user_id():
         return redirect("/login")
     return render_template("avatar_select.html", avatars=AVATARS)
 
@@ -636,156 +551,6 @@ def onboarding_status():
     return jsonify({"logged_in": True, "needs_welcome": True,
                     "welcome_message": "Hi! Welcome! What should I call you?",
                     "quick_actions": [], "profile": profile})
-
-
-@app.route("/api/dynamodb/status")
-def dynamodb_status():
-    store = _dynamodb_store()
-    if not store:
-        return jsonify({"enabled": False, "reason": "Set DYNAMODB_ENABLED=1 and create the tables first."})
-    return jsonify({"enabled": True, "region": store.region, "prefix": store.prefix,
-                    "logged_in": bool(_dynamodb_user_id())})
-
-
-@app.route("/api/dynamodb/conversations")
-def dynamodb_conversations():
-    store = _dynamodb_store()
-    user_id = _dynamodb_user_id()
-    if not store or not user_id:
-        return jsonify({"error": "Log in with Google and enable DynamoDB first."}), 401
-    try:
-        limit = int(request.args.get("limit", 20))
-        result = store.list_conversations(user_id, limit=limit)
-        return jsonify(result)
-    except Exception:
-        logger.exception("DynamoDB list conversations failed")
-        return jsonify({"error": "Could not load conversations."}), 502
-
-
-@app.route("/api/dynamodb/conversations/<conversation_id>/messages")
-def dynamodb_messages(conversation_id):
-    store = _dynamodb_store()
-    user_id = _dynamodb_user_id()
-    if not store or not user_id:
-        return jsonify({"error": "Log in with Google and enable DynamoDB first."}), 401
-    try:
-        limit = int(request.args.get("limit", 50))
-        return jsonify(store.load_messages(user_id, conversation_id, limit=limit))
-    except Exception:
-        logger.exception("DynamoDB load messages failed")
-        return jsonify({"error": "Could not load messages."}), 502
-
-
-@app.route("/api/dynamodb/rate", methods=["POST"])
-def dynamodb_rate():
-    store = _dynamodb_store()
-    user_id = _dynamodb_user_id()
-    if not store or not user_id:
-        return jsonify({"error": "Log in with Google and enable DynamoDB first."}), 401
-    data = request.get_json(silent=True) or {}
-    try:
-        item = store.rate_message(user_id, data.get("conversation_id", ""),
-                                  data.get("message_id", ""), data.get("rating", ""),
-                                  data.get("correction_text", ""))
-        if not item:
-            return jsonify({"error": "Message not found."}), 404
-        return jsonify({"status": "rated", "message_id": item["message_id"]})
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    except Exception:
-        logger.exception("DynamoDB rate failed")
-        return jsonify({"error": "Could not save rating."}), 502
-
-
-@app.route("/api/dynamodb/consent", methods=["POST"])
-def dynamodb_consent():
-    store = _dynamodb_store()
-    user_id = _dynamodb_user_id()
-    if not store or not user_id:
-        return jsonify({"error": "Log in with Google and enable DynamoDB first."}), 401
-    data = request.get_json(silent=True) or {}
-    try:
-        user = store.set_consent(user_id, bool(data.get("consent_for_learning", False)))
-        return jsonify({"consent_for_learning": user.get("consent_for_learning"),
-                        "do_not_use_for_learning": user.get("do_not_use_for_learning")})
-    except Exception:
-        logger.exception("DynamoDB consent failed")
-        return jsonify({"error": "Could not save consent."}), 502
-
-
-@app.route("/api/dynamodb/export")
-def dynamodb_export():
-    store = _dynamodb_store()
-    user_id = _dynamodb_user_id()
-    if not store or not user_id:
-        return jsonify({"error": "Log in with Google and enable DynamoDB first."}), 401
-    try:
-        return jsonify(store.export_user_data(user_id))
-    except Exception:
-        logger.exception("DynamoDB export failed")
-        return jsonify({"error": "Could not export data."}), 502
-
-
-@app.route("/api/dynamodb/search")
-def dynamodb_search():
-    """Search the logged-in user's own approved past answers.
-    Supabase must be configured, otherwise returns []."""
-    store = _dynamodb_store()
-    user_id = _dynamodb_user_id()
-    if not store or not user_id:
-        return jsonify({"error": "Log in with Google and enable DynamoDB first."}), 401
-    query = request.args.get("q", "")
-    return jsonify({"query": query, "results": search_good_answers(store, user_id, query)})
-
-
-@app.route("/api/dynamodb/sync-learning", methods=["POST"])
-def dynamodb_sync_learning():
-    """Admin-only nightly sync: LEARN_PENDING -> Supabase -> LEARN_SYNCED."""
-    store = _dynamodb_store()
-    user_id = _dynamodb_user_id()
-    if not store or not user_id:
-        return jsonify({"error": "Log in with Google and enable DynamoDB first."}), 401
-    if not is_admin(user_id):
-        return jsonify({"error": "Admin only. Set ADMIN_GOOGLE_SUB to your Google sub first."}), 403
-    try:
-        return jsonify(sync_learning_pending(store))
-    except Exception:
-        logger.exception("Supabase sync failed")
-        return jsonify({"error": "Sync failed."}), 502
-
-
-@app.route("/api/admin/usage")
-def admin_usage():
-    """Step 7 usage page data. Admin-only, and only when an admin
-    is configured — otherwise 503, never open to any logged-in user."""
-    user_id = _dynamodb_user_id()
-    if not user_id or not is_admin(user_id):
-        return jsonify({"error": "Admin only. Set ADMIN_GOOGLE_SUB to your Google sub first."}), 403
-    try:
-        region = os.environ.get("AWS_REGION", "ap-south-1")
-        return jsonify(get_usage(region=region,
-                                 prefix=os.environ.get("DYNAMODB_TABLE_PREFIX", "shibu")))
-    except Exception:
-        logger.exception("Usage check failed")
-        return jsonify({"error": "Could not load usage. Check AWS credentials and region."}), 502
-
-
-@app.route("/api/dynamodb/delete-all", methods=["POST"])
-def dynamodb_delete_all():
-    store = _dynamodb_store()
-    user_id = _dynamodb_user_id()
-    if not store or not user_id:
-        return jsonify({"error": "Log in with Google and enable DynamoDB first."}), 401
-    data = request.get_json(silent=True) or {}
-    if data.get("confirm") is not True:
-        return jsonify({"error": "Send {\"confirm\": true} to delete all your data."}), 400
-    try:
-        result = store.delete_all_user_data(user_id)
-        session.pop("dynamodb_conversation_id", None)
-        return jsonify(result)
-    except Exception:
-        logger.exception("DynamoDB delete-all failed")
-        return jsonify({"error": "Could not delete data."}), 502
 
 
 @app.errorhandler(404)

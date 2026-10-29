@@ -13,6 +13,3 @@ python-pptx>=0.6.21
 # Optional: faster / more reliable DuckDuckGo search. The app works without it.
 ddgs>=9.0; python_version >= "3.9"
 pytest>=8.0
-# DynamoDB (Step 4, optional at runtime): needed only when DYNAMODB_ENABLED=1.
-# The app still runs without it, but then DynamoDB stays disabled.
-boto3>=1.34

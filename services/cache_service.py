@@ -1,16 +1,10 @@
-"""Step 5: small in-memory cache in front of DynamoDB cached answers.
-
-Two layers, in order, for a repeated question:
-  1. This process's memory (fastest, 5 minutes, max 100 entries).
-     Cleared on restart/redeploy — that is fine, DynamoDB is the
-     durable layer below it.
-  2. DynamoDB shibu-cached-answers (shared, 30-day TTL).
-  3. Only if both miss: the live web search.
+"""Small in-memory cache for repeated web questions (5 minutes,
+max 100 entries, cleared on restart/redeploy).
 
 Only short, non-personal summaries are cached, never a full page
 and never a user's own message or history. Callers must decide
-before caching that a query is not personal — see
-dynamodb_store.put_cached_answer() and app.py's cache gate.
+before caching that a query is not personal — see app.py's
+cache gate.
 
 Normalization for cache keys: lowercase, collapse whitespace,
 strip trailing punctuation. "What is Python?" and "what is python"
@@ -71,39 +65,14 @@ def memory_clear() -> None:
     _memory.clear()
 
 
-def cached_answer_lookup(store, normalized: str):
-    """Memory first, then DynamoDB. Returns a dict or None, and
-    records a DynamoDB hit when it was a DynamoDB hit (best effort)."""
-    hit = memory_get(normalized)
-    if hit is not None:
-        return hit
-    if store is None:
-        return None
-    item = store.get_cached_answer(normalized)
-    if item is None:
-        return None
-    result = {
-        "summary": item.get("summary", ""),
-        "sources": item.get("sources", []),
-        "tool": item.get("tool", "web"),
-        "cached": True,
-    }
-    memory_put(normalized, result)
-    try:
-        store.record_cache_hit(normalized)
-    except Exception:
-        pass
-    return result
+def cached_answer_lookup(normalized: str):
+    """Memory only. Returns a dict or None."""
+    return memory_get(normalized)
 
 
-def cached_answer_store(store, normalized: str, original: str,
-                        summary: str, sources: list, tool: str = "web") -> None:
-    """Store in both layers. Never raises — caching must never
+def cached_answer_store(normalized: str, summary: str, sources: list,
+                        tool: str = "web") -> None:
+    """Store in memory only. Never raises — caching must never
     break a chat answer."""
     result = {"summary": summary, "sources": sources, "tool": tool, "cached": True}
     memory_put(normalized, result)
-    if store is not None:
-        try:
-            store.put_cached_answer(normalized, original, summary, sources, tool=tool)
-        except Exception:
-            pass

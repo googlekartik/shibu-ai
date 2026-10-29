@@ -1,4 +1,4 @@
-"""Google login helper for Shibu AI (Step 4).
+"""Google login helper for Shibu AI.
 
 Flow (server-side only, no secret ever reaches the frontend):
   1. /auth/google redirects to Google with client_id, redirect_uri,
@@ -9,7 +9,7 @@ Flow (server-side only, no secret ever reaches the frontend):
      only in environment variables, only on this request).
   4. The server verifies the ID token and extracts `sub` (the stable
      Google account ID), email, and display name. `sub` becomes the
-     DynamoDB user key as "google#<sub>" — never the email, which
+     session user key as "google#<sub>" — never the email, which
      can change.
   5. The Flask session stores only user_id / display_name / email.
      The Google tokens themselves are NOT stored in the session.
@@ -43,6 +43,12 @@ AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 TOKENINFO_URL = "https://oauth2.googleapis.com/tokeninfo"
 SCOPES = "openid email profile"
+
+
+def google_user_id(google_sub: str) -> str:
+    """Session user key from a Google sub. Never use the email as
+    the key — an email can change, a sub cannot."""
+    return f"google#{google_sub}"
 
 
 def build_authorization_url(client_id: str, redirect_uri: str, state: str) -> str:
