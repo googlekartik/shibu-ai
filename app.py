@@ -383,6 +383,14 @@ def clear():
     return jsonify({"status": "cleared"})
 
 
+@app.route("/login")
+def login_page():
+    """Dedicated login page (clean, black, same theme as chat).
+    The actual sign-in is /auth/google; this page only explains
+    what signing in does and does not do, and links to it."""
+    return render_template("login.html")
+
+
 @app.route("/auth/google")
 def google_login():
     cfg = google_config()

@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sign in — Shibu AI</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><img class="avatar" src="{{ url_for('static', filename='shibu.png') }}" alt="Shibu AI"> Shibu AI</div>
+  <div class="header-actions">
+    <a href="/" class="text-btn" style="text-decoration:none;">Back to chat</a>
+  </div>
+</header>
+
+<main class="chat-wrap" style="justify-content:center;">
+  <div class="details-inner" style="max-width:520px; margin:40px auto; text-align:center;">
+    <h2 style="margin-top:0;">Sign in with Google</h2>
+    <p class="muted">Signing in is optional. Without it, you can still chat —
+       your history just stays in this browser and on this server session,
+       and is not saved to a database.</p>
+    <p style="text-align:left;">With sign-in, Shibu AI can:</p>
+    <ul style="text-align:left; line-height:1.8;">
+      <li>Save your chats under your Google account (when DynamoDB is enabled)</li>
+      <li>Remember your tone / level preferences</li>
+      <li>Let you export or delete all of your saved data</li>
+    </ul>
+    <p class="muted small" style="text-align:left;">Shibu AI stores only your
+       Google account ID, display name and email in its session. It never
+       stores your Google password or Google tokens, and it never uses your
+       email as your account key — your stable Google ID is the key.</p>
+    <p style="margin:24px 0 8px;">
+      <a href="/auth/google" class="google-btn">Sign in with Google</a>
+    </p>
+    <p class="muted small">If this button shows a "not configured" error,
+       the site owner has not set up Google login yet (GOOGLE_CLIENT_ID
+       is missing). Chat still works without signing in.</p>
+    <p><a href="/" class="text-btn">Continue without signing in →</a></p>
+  </div>
+</main>
+</body>
+</html>

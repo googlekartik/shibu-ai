@@ -156,6 +156,34 @@ inputEl.addEventListener("input", () => {
   inputEl.style.height = "auto";
   inputEl.style.height = Math.min(inputEl.scrollHeight, 140) + "px";
 });
+// Google login state in the header: Sign in -> /login page, or
+// display name + Log out when already signed in. Chat works either way.
+async function refreshLoginState() {
+  const loginBtn = document.getElementById("loginBtn");
+  const logoutBtn = document.getElementById("logoutBtn");
+  const userLabel = document.getElementById("userLabel");
+  if (!loginBtn || !logoutBtn || !userLabel) return;
+  try {
+    const res = await fetch("/api/me");
+    const me = await res.json();
+    if (me.logged_in) {
+      loginBtn.classList.add("hidden");
+      logoutBtn.classList.remove("hidden");
+      userLabel.textContent = me.display_name ? "Signed in as " + me.display_name : "Signed in";
+      userLabel.classList.remove("hidden");
+    } else {
+      loginBtn.classList.remove("hidden");
+      logoutBtn.classList.add("hidden");
+      userLabel.classList.add("hidden");
+    }
+  } catch (e) { /* header stays on Sign in; chat still works */ }
+}
+document.getElementById("logoutBtn").onclick = async () => {
+  await fetch("/auth/logout", { method: "POST" });
+  await refreshLoginState();
+};
+refreshLoginState();
+
 document.getElementById("detailsBtn").onclick = () => detailsEl.classList.toggle("hidden");
 document.getElementById("historyBtn").onclick = () => {
   renderHistory();
