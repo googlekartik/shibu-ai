@@ -16,14 +16,26 @@ function saveToHistory(text, role) {
   } catch (e) { /* private browsing etc. - chat still works without saving */ }
 }
 
-function renderHistory() {
-  const list = document.getElementById("historyList");
-  const empty = document.getElementById("historyEmpty");
+async function renderHistory() {
+  const list = document.getElementById("sidebarList");
+  const empty = document.getElementById("sidebarEmpty");
+  if (!list || !empty) return;
   list.innerHTML = "";
   let questions = [];
   try {
     const saved = JSON.parse(localStorage.getItem("rb_chat_history") || "[]");
     questions = saved.filter(m => m.role === "user").map(m => m.text);
+  } catch (e) {}
+  // Signed-in + DynamoDB: prefer the server conversation list, so the
+  // sidebar follows the user across devices. Otherwise use this
+  // browser's history. Server failures fall back to local history.
+  try {
+    const res = await fetch("/api/dynamodb/conversations");
+    if (res.ok) {
+      const data = await res.json();
+      const convs = (data.conversations || []).map(c => c.title).filter(Boolean);
+      if (convs.length) questions = convs;
+    }
   } catch (e) {}
   // Most recent first, duplicates removed, last 20.
   const unique = [...new Set(questions.reverse())].slice(0, 20);
@@ -31,10 +43,7 @@ function renderHistory() {
   unique.forEach(q => {
     const li = document.createElement("li");
     li.textContent = q;
-    li.onclick = () => {
-      document.getElementById("historyPanel").classList.add("hidden");
-      sendMessage(q);
-    };
+    li.onclick = () => { sendMessage(q); };
     list.appendChild(li);
   });
 }
@@ -73,6 +82,17 @@ function addMessage(text, role, extra, saveHistory = true) {
     });
     wrap.appendChild(table);
     div.appendChild(wrap);
+  }
+  if (role === "bot" && extra && extra.quick_actions) {
+    const qa = document.createElement("div");
+    qa.className = "quick-actions";
+    extra.quick_actions.forEach(label => {
+      const b = document.createElement("button");
+      b.type = "button"; b.textContent = label;
+      b.onclick = () => sendMessage(label);
+      qa.appendChild(b);
+    });
+    div.appendChild(qa);
   }
   if (role === "bot") {
     const tools = document.createElement("div");
@@ -162,6 +182,8 @@ async function refreshLoginState() {
   const loginBtn = document.getElementById("loginBtn");
   const logoutBtn = document.getElementById("logoutBtn");
   const userLabel = document.getElementById("userLabel");
+  const avatarLink = document.getElementById("userAvatarLink");
+  const avatarImg = document.getElementById("userAvatar");
   if (!loginBtn || !logoutBtn || !userLabel) return;
   try {
     const res = await fetch("/api/me");
@@ -171,12 +193,27 @@ async function refreshLoginState() {
       logoutBtn.classList.remove("hidden");
       userLabel.textContent = me.display_name ? "Signed in as " + me.display_name : "Signed in";
       userLabel.classList.remove("hidden");
+      if (avatarLink && avatarImg) {
+        avatarImg.src = me.avatar_url || "/static/shibu.png";
+        avatarLink.classList.remove("hidden");
+      }
+      if (me.onboarding_stage === "need_avatar") { window.location.href = "/avatar"; return; }
     } else {
       loginBtn.classList.remove("hidden");
       logoutBtn.classList.add("hidden");
       userLabel.classList.add("hidden");
+      if (avatarLink) avatarLink.classList.add("hidden");
     }
   } catch (e) { /* header stays on Sign in; chat still works */ }
+}
+async function showWelcomeIfNeeded() {
+  try {
+    const res = await fetch("/api/onboarding/status");
+    const data = await res.json();
+    if (data.needs_welcome && data.welcome_message) {
+      addMessage(data.welcome_message, "bot", null, false);
+    }
+  } catch (e) {}
 }
 document.getElementById("logoutBtn").onclick = async () => {
   await fetch("/auth/logout", { method: "POST" });
@@ -185,9 +222,15 @@ document.getElementById("logoutBtn").onclick = async () => {
 refreshLoginState();
 
 document.getElementById("detailsBtn").onclick = () => detailsEl.classList.toggle("hidden");
-document.getElementById("historyBtn").onclick = () => {
-  renderHistory();
-  document.getElementById("historyPanel").classList.toggle("hidden");
+const sidebarEl = document.getElementById("sidebar");
+document.getElementById("sidebarBtn").onclick = () => {
+  if (sidebarEl) { sidebarEl.classList.toggle("hidden"); if (!sidebarEl.classList.contains("hidden")) renderHistory(); }
+};
+document.getElementById("newChatBtn").onclick = async () => {
+  await fetch("/api/clear", { method: "POST" });
+  messagesEl.innerHTML = "";
+  await showWelcomeIfNeeded();
+  if (!messagesEl.children.length) addMessage("Hello! I'm Shibu AI. How can I help you today?", "bot");
 };
 document.getElementById("clearBtn").onclick = async () => {
   await fetch("/api/clear", { method: "POST" });
@@ -216,11 +259,26 @@ if (!SpeechRec) {
   };
 }
 
-// Restore saved chat if there is one, otherwise show a minimal greeting.
-let restored = false;
-try {
-  const saved = JSON.parse(localStorage.getItem("rb_chat_history") || "[]");
-  saved.forEach(m => addMessage(m.text, m.role, null, false));
-  restored = saved.length > 0;
-} catch (e) {}
-if (!restored) addMessage("Hello! I'm Shibu AI. How can I help you today?", "bot");
+// Restore saved chat if there is one. First-time logged-in users get
+// the welcome question instead of the generic greeting; returning
+// users (onboarding completed) get the generic greeting only when
+// there is no restored chat, and skip onboarding entirely.
+(async () => {
+  let restored = false;
+  try {
+    const saved = JSON.parse(localStorage.getItem("rb_chat_history") || "[]");
+    saved.forEach(m => addMessage(m.text, m.role, null, false));
+    restored = saved.length > 0;
+  } catch (e) {}
+  let welcomed = false;
+  try {
+    const res = await fetch("/api/onboarding/status");
+    const data = await res.json();
+    if (data.needs_welcome && data.welcome_message) {
+      addMessage(data.welcome_message, "bot", null, false);
+      welcomed = true;
+    }
+  } catch (e) {}
+  if (!restored && !welcomed) addMessage("Hello! I'm Shibu AI. How can I help you today?", "bot");
+  renderHistory();
+})();

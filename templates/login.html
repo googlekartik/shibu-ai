@@ -5,25 +5,32 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Sign in — Shibu AI</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+<style>
+  body.login-page { background: linear-gradient(135deg, #0f0f1a, #1e1b4b 45%, #0f766e); }
+  .login-card { max-width: 480px; margin: 48px auto; text-align: center; background: rgba(20,20,20,0.92);
+    border: 1px solid #333; border-radius: 24px; padding: 32px 28px;
+    animation: loginIn 0.5s ease both; box-shadow: 0 20px 60px rgba(0,0,0,0.45); }
+  @keyframes loginIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+  .login-avatar { width: 120px; height: 120px; border-radius: 50%; object-fit: cover;
+    border: 3px solid #7c5cff; margin-bottom: 8px; }
+  .login-card ul { text-align: left; line-height: 1.8; }
+</style>
 </head>
-<body>
+<body class="login-page">
 <header class="topbar">
   <div class="brand"><img class="avatar" src="{{ url_for('static', filename='shibu.png') }}" alt="Shibu AI"> Shibu AI</div>
   <div class="header-actions">
     <a href="/" class="text-btn" style="text-decoration:none;">Back to chat</a>
   </div>
 </header>
-
 <main class="chat-wrap" style="justify-content:center;">
-  <div class="details-inner" style="max-width:520px; margin:40px auto; text-align:center;">
-    <h2 style="margin-top:0;">Sign in with Google</h2>
-    <p class="muted">Signing in is optional. Without it, you can still chat —
-       your history just stays in this browser and on this server session,
-       and is not saved to a database.</p>
-    <p style="text-align:left;">With sign-in, Shibu AI can:</p>
-    <ul style="text-align:left; line-height:1.8;">
+  <div class="login-card">
+    <img class="login-avatar" src="{{ url_for('static', filename='avatars/avatar-1.svg') }}" alt="Shibu AI welcome avatar">
+    <h2 style="margin-top:0;">Welcome to Shibu AI</h2>
+    <p class="muted">Sign in to save your chats, avatar and preferences under your own account.</p>
+    <ul>
       <li>Save your chats under your Google account (when DynamoDB is enabled)</li>
-      <li>Remember your tone / level preferences</li>
+      <li>Choose an avatar and remember it across sessions and devices</li>
       <li>Let you export or delete all of your saved data</li>
     </ul>
     <p class="muted small" style="text-align:left;">Shibu AI stores only your

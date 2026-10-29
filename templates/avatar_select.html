@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Choose your avatar — Shibu AI</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+<style>
+  .avatar-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 16px; margin: 24px 0; }
+  .avatar-choice { background: #141414; border: 2px solid #262626; border-radius: 20px; padding: 14px 8px;
+    cursor: pointer; text-align: center; transition: transform 0.15s ease, border-color 0.15s ease; color: #f5f5f5; font: inherit; }
+  .avatar-choice:hover { transform: translateY(-3px); }
+  .avatar-choice.selected { border-color: #7c5cff; box-shadow: 0 0 0 3px rgba(124,92,255,0.35); animation: pop 0.25s ease; }
+  @keyframes pop { from { transform: scale(0.96); } to { transform: scale(1); } }
+  .avatar-choice img { width: 84px; height: 84px; border-radius: 50%; object-fit: cover; }
+  .avatar-choice .name { font-weight: 700; margin-top: 8px; }
+  .avatar-choice .style { font-size: 12px; color: #a0a0a0; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><img class="avatar" src="{{ url_for('static', filename='shibu.png') }}" alt="Shibu AI"> Shibu AI</div>
+  <div class="header-actions"><a href="/" class="text-btn" style="text-decoration:none;">Back to chat</a></div>
+</header>
+<main class="chat-wrap" style="justify-content:center;">
+  <div class="details-inner" style="max-width:620px; margin:24px auto; text-align:center;">
+    <h2 style="margin-top:0;">Choose your avatar</h2>
+    <p class="muted">Pick one — it will show beside your name in chat, and you can change it later from the chat header.</p>
+    <div class="avatar-grid" id="avatarGrid">
+      {% for a in avatars %}
+      <button type="button" class="avatar-choice" data-avatar-id="{{ a.id }}">
+        <img src="{{ url_for('static', filename=a.file) }}" alt="{{ a.name }} avatar">
+        <div class="name">{{ a.name }}</div>
+        <div class="style">{{ a.style }}</div>
+      </button>
+      {% endfor %}
+    </div>
+    <p id="avatarError" class="muted small hidden" style="color:#ff8a8a;"></p>
+    <p><button id="continueBtn" type="button" class="google-btn" disabled>Continue</button></p>
+    <p class="muted small">Returning users with a saved avatar skip this page automatically.</p>
+  </div>
+</main>
+<script>
+let selected = null;
+const grid = document.getElementById("avatarGrid");
+const cont = document.getElementById("continueBtn");
+const err = document.getElementById("avatarError");
+grid.addEventListener("click", (e) => {
+  const btn = e.target.closest(".avatar-choice");
+  if (!btn) return;
+  grid.querySelectorAll(".avatar-choice").forEach(b => b.classList.remove("selected"));
+  btn.classList.add("selected");
+  selected = btn.dataset.avatarId;
+  cont.disabled = false;
+});
+cont.addEventListener("click", async () => {
+  if (!selected) return;
+  err.classList.add("hidden");
+  const res = await fetch("/api/profile/avatar", { method: "POST",
+    headers: { "Content-Type": "application/json" }, body: JSON.stringify({ avatar_id: selected }) });
+  const data = await res.json();
+  if (!res.ok) { err.textContent = data.error || "Could not save your avatar."; err.classList.remove("hidden"); return; }
+  window.location.href = "/";
+});
+</script>
+</body>
+</html>

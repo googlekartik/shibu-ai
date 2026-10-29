@@ -170,6 +170,34 @@ class DynamoDBStore:
         )
         return self.get_user(user_id)
 
+    def update_profile(self, user_id: str, display_name=None,
+                         avatar_id=None, onboarding_completed=None) -> dict | None:
+        """Update only the profile fields supplied. Avatar, preferred
+        name and onboarding completion live on the existing user item
+        in shibu-users — no new table and no duplicate account. Values
+        are validated by the caller (app.py AVATARS list)."""
+        names, values, sets = {}, {}, []
+        if display_name is not None:
+            names["#d"] = "display_name"; values[":d"] = str(display_name)[:100]
+            sets.append("#d = :d")
+        if avatar_id is not None:
+            names["#a"] = "avatar_id"; values[":a"] = str(avatar_id)
+            sets.append("#a = :a")
+        if onboarding_completed is not None:
+            names["#o"] = "onboarding_completed"; values[":o"] = bool(onboarding_completed)
+            sets.append("#o = :o")
+        if not sets:
+            return self.get_user(user_id)
+        names["#u"] = "updated_at"; values[":u"] = _now_iso()
+        sets.append("#u = :u")
+        self.users.update_item(
+            Key={"user_id": user_id},
+            UpdateExpression="SET " + ", ".join(sets),
+            ExpressionAttributeNames=names,
+            ExpressionAttributeValues=values,
+        )
+        return self.get_user(user_id)
+
     def set_consent(self, user_id: str, consent_for_learning: bool) -> dict | None:
         """Set both flags consistently. Opting out also removes the
         user's messages from learning (DynamoDB side; search rows are

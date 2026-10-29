@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" role="img" aria-label="Nia avatar">
+  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0d9488"/><stop offset="1" stop-color="#f59e0b"/></linearGradient></defs>
+  <circle cx="120" cy="120" r="120" fill="url(#g)"/>
+  <path d="M78 170 Q70 100 90 78 M108 172 Q104 95 120 78 M132 172 Q136 95 120 78 M162 170 Q170 100 150 78" stroke="#111827" stroke-width="14" fill="none" stroke-linecap="round"/>
+  <path d="M45 212 Q120 152 195 212 L195 240 L45 240 Z" fill="#134e4a"/>
+  <circle cx="120" cy="125" r="48" fill="#8d5a2b"/>
+  <circle cx="102" cy="122" r="5" fill="#111827"/><circle cx="138" cy="122" r="5" fill="#111827"/>
+  <path d="M108 142 Q120 152 132 142" stroke="#111827" stroke-width="4" fill="none" stroke-linecap="round"/>
+  <circle cx="88" cy="138" r="8" fill="#fbbf24" opacity="0.5"/><circle cx="152" cy="138" r="8" fill="#fbbf24" opacity="0.5"/>
+</svg>

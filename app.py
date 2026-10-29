@@ -77,6 +77,97 @@ def _dynamodb_store():
         return None
 
 
+# Onboarding avatars: illustrated assets in static/avatars/. The first
+# avatar is also the welcome image on /login. Files are swapped by
+# replacing these SVGs — no code change is needed for new artwork.
+AVATARS = [
+    {"id": "maya", "name": "Maya", "file": "avatars/avatar-1.svg",
+     "style": "Short black bob, blue outfit", "color": "#7c5cff"},
+    {"id": "aria", "name": "Aria", "file": "avatars/avatar-2.svg",
+     "style": "Long brown wavy hair, green outfit", "color": "#10b981"},
+    {"id": "zara", "name": "Zara", "file": "avatars/avatar-3.svg",
+     "style": "Curly red hair, purple outfit", "color": "#a855f7"},
+    {"id": "luna", "name": "Luna", "file": "avatars/avatar-4.svg",
+     "style": "Blonde pixie cut, pink outfit", "color": "#f472b6"},
+    {"id": "nia", "name": "Nia", "file": "avatars/avatar-5.svg",
+     "style": "Braided hair, teal outfit", "color": "#0d9488"},
+]
+AVATAR_IDS = {a["id"] for a in AVATARS}
+QUICK_ACTIONS = ["Search the web", "Ask a question", "Learn something new",
+                 "Write or create something", "Help me with something else"]
+
+
+def _avatar_url(avatar_id):
+    for a in AVATARS:
+        if a["id"] == avatar_id:
+            return "/static/" + a["file"]
+    return "/static/shibu.png"
+
+
+def _profile():
+    """Logged-in profile, from DynamoDB when enabled, else the Flask
+    session. Session is the fallback only: it remembers the profile in
+    this browser, while DynamoDB is what carries it across devices.
+    Server-side authorisation: the user_id always comes from the
+    session, never from a request body, so a user can only read or
+    change their own profile."""
+    user_id = _dynamodb_user_id()
+    if not user_id:
+        return {"logged_in": False, "user_id": None, "display_name": "",
+                "avatar_id": None, "avatar_url": "/static/shibu.png",
+                "onboarding_completed": False, "onboarding_stage": None}
+    profile = {"logged_in": True, "user_id": user_id,
+               "display_name": session.get("google_display_name", "") or "",
+               "avatar_id": session.get("profile_avatar_id"),
+               "onboarding_completed": bool(session.get("onboarding_completed")),
+               "onboarding_stage": session.get("onboarding_stage")}
+    store = _dynamodb_store()
+    if store:
+        try:
+            user = store.get_user(user_id)
+        except Exception:
+            user = None
+        if user:
+            if user.get("avatar_id") in AVATAR_IDS:
+                profile["avatar_id"] = user["avatar_id"]
+            if user.get("display_name"):
+                profile["display_name"] = user["display_name"]
+            if user.get("onboarding_completed"):
+                profile["onboarding_completed"] = True
+                profile["onboarding_stage"] = None
+    if profile["avatar_id"] not in AVATAR_IDS:
+        profile["avatar_id"] = None
+    if not profile["onboarding_completed"] and not profile["onboarding_stage"]:
+        profile["onboarding_stage"] = "ask_name" if profile["avatar_id"] else "need_avatar"
+    profile["avatar_url"] = _avatar_url(profile["avatar_id"])
+    return profile
+
+
+def _save_profile(display_name=None, avatar_id=None, onboarding_completed=None,
+                  onboarding_stage=None):
+    """Save to the session always, and to DynamoDB best-effort when
+    enabled. Returns the fresh profile."""
+    user_id = _dynamodb_user_id()
+    if display_name is not None:
+        session["google_display_name"] = display_name
+    if avatar_id is not None:
+        session["profile_avatar_id"] = avatar_id
+    if onboarding_completed is not None:
+        session["onboarding_completed"] = bool(onboarding_completed)
+    if onboarding_stage is not None:
+        session["onboarding_stage"] = onboarding_stage
+    if user_id:
+        store = _dynamodb_store()
+        if store:
+            try:
+                store.update_profile(user_id, display_name=display_name,
+                                     avatar_id=avatar_id,
+                                     onboarding_completed=onboarding_completed)
+            except Exception:
+                logger.exception("DynamoDB profile save failed (session kept)")
+    return _profile()
+
+
 def _save_chat_to_dynamodb(user_message, payload, ctx):
     """Best-effort persistence after a chat answer. One conversation
     per Flask session; a failure here is logged and ignored."""
@@ -179,6 +270,38 @@ def chat():
     if not ok:
         return jsonify({"error": message_or_error}), 400
     ctx = _context()
+    # First-time welcome conversation (logged-in users only, and only
+    # until onboarding completes). Anonymous chat is untouched.
+    # Stage ask_name: the reply is the preferred name, saved only here
+    # after the user has typed it in this step. Stage ask_goal: the
+    # next reply is their first real request, so onboarding completes
+    # and the message falls through to the normal router below.
+    profile = _profile()
+    if profile["logged_in"] and not profile["onboarding_completed"]:
+        if profile["onboarding_stage"] == "need_avatar":
+            return jsonify({"response": "Please choose an avatar first.",
+                            "intent": "ONBOARDING", "rule_id": "onboarding_avatar",
+                            "confidence": 1.0, "confidence_label": "HIGH",
+                            "tool": "Onboarding", "action": "Avatar selection required",
+                            "needs_avatar": True}), 200
+        if profile["onboarding_stage"] == "ask_name":
+            name = message_or_error.strip()
+            if len(name) > 60 or "?" in name:
+                return jsonify({"response": "Hi! Welcome! What should I call you? "
+                                "Just reply with your name, for example: Alex",
+                                "intent": "ONBOARDING", "rule_id": "onboarding_name",
+                                "confidence": 1.0, "confidence_label": "HIGH",
+                                "tool": "Onboarding", "action": "Ask preferred name"}), 200
+            _save_profile(display_name=name, onboarding_stage="ask_goal")
+            payload = {"response": f"Nice to meet you, {name}! What would you like to do today?",
+                       "intent": "ONBOARDING", "rule_id": "onboarding_goal",
+                       "confidence": 1.0, "confidence_label": "HIGH",
+                       "tool": "Onboarding", "action": "Ask first goal",
+                       "quick_actions": QUICK_ACTIONS}
+            _save_chat_to_dynamodb(message_or_error, payload, ctx)
+            return jsonify(payload)
+        if profile["onboarding_stage"] == "ask_goal":
+            _save_profile(onboarding_completed=True, onboarding_stage=None)
     # Step 5 cache, before the (slow) web search: only for questions
     # with no rule and no maths, so a rule/math answer is never
     # replaced by a cached web answer. Personal queries are never cached.
@@ -430,6 +553,12 @@ def google_callback():
                                      google_sub=claims["sub"])
         except Exception:
             logger.exception("DynamoDB user creation failed (login still succeeded)")
+    # First-time flow: no avatar yet -> avatar selection. Returning
+    # users with a saved avatar (and completed onboarding) go straight
+    # to chat, and are never asked to choose again.
+    profile = _profile()
+    if not profile["avatar_id"]:
+        return redirect("/avatar")
     return redirect("/")
 
 
@@ -439,17 +568,74 @@ def google_logout():
     session.pop("google_display_name", None)
     session.pop("google_email", None)
     session.pop("dynamodb_conversation_id", None)
+    session.pop("profile_avatar_id", None)
+    session.pop("onboarding_completed", None)
+    session.pop("onboarding_stage", None)
     return jsonify({"status": "logged out"})
 
 
 @app.route("/api/me")
 def me():
-    return jsonify({
-        "logged_in": bool(_dynamodb_user_id()),
-        "user_id": _dynamodb_user_id(),
-        "display_name": session.get("google_display_name", ""),
-        "dynamodb_enabled": _dynamodb_store() is not None,
-    })
+    profile = _profile()
+    profile["dynamodb_enabled"] = _dynamodb_store() is not None
+    return jsonify(profile)
+
+
+@app.route("/avatar")
+def avatar_page():
+    """Avatar selection, also used later from the chat header to
+    change an avatar. Login is required: the avatar belongs to the
+    authenticated user_id in the session, never to a request body."""
+    if not _dynamodb_user_id():
+        return redirect("/login")
+    return render_template("avatar_select.html", avatars=AVATARS)
+
+
+@app.route("/api/avatars")
+def avatars_list():
+    return jsonify({"avatars": AVATARS})
+
+
+@app.route("/api/profile")
+def profile_api():
+    return jsonify(_profile())
+
+
+@app.route("/api/profile/avatar", methods=["POST"])
+def set_avatar():
+    """Save the selected avatar to the logged-in user's profile.
+    Anonymous requests are rejected: there is no profile to save to."""
+    profile = _profile()
+    if not profile["logged_in"]:
+        return jsonify({"error": "Please sign in first."}), 401
+    data = request.get_json(silent=True) or {}
+    avatar_id = data.get("avatar_id")
+    if avatar_id not in AVATAR_IDS:
+        return jsonify({"error": "Unknown avatar. Choose one of: " + ", ".join(sorted(AVATAR_IDS))}), 400
+    # Changing an avatar later must not restart the welcome flow for
+    # a user who already completed onboarding.
+    stage = None if profile["onboarding_completed"] else "ask_name"
+    saved = _save_profile(avatar_id=avatar_id, onboarding_stage=stage)
+    return jsonify(saved)
+
+
+@app.route("/api/onboarding/status")
+def onboarding_status():
+    """What the chat UI should show on load. Returning users with a
+    completed onboarding get needs_welcome False and skip straight
+    to their previous chat; first-time users get the welcome question."""
+    profile = _profile()
+    if not profile["logged_in"]:
+        return jsonify({"logged_in": False, "needs_welcome": False})
+    if profile["onboarding_completed"]:
+        return jsonify({"logged_in": True, "needs_welcome": False,
+                        "profile": profile})
+    if profile["onboarding_stage"] == "need_avatar":
+        return jsonify({"logged_in": True, "needs_welcome": False,
+                        "needs_avatar": True, "profile": profile})
+    return jsonify({"logged_in": True, "needs_welcome": True,
+                    "welcome_message": "Hi! Welcome! What should I call you?",
+                    "quick_actions": [], "profile": profile})
 
 
 @app.route("/api/dynamodb/status")

@@ -10,24 +10,28 @@
 <header class="topbar">
   <div class="brand"><img class="avatar" src="{{ url_for('static', filename='shibu.png') }}" alt="Shibu AI"> Shibu AI</div>
   <div class="header-actions">
-    <button id="historyBtn" type="button" class="text-btn">History</button>
+    <button id="sidebarBtn" type="button" class="text-btn">Chats</button>
     <button id="detailsBtn" type="button" class="text-btn">Details</button>
     <button id="clearBtn" type="button" class="text-btn">Clear</button>
     <span id="userLabel" class="muted small hidden"></span>
+    <a id="userAvatarLink" href="/avatar" class="hidden" title="Change avatar"><img id="userAvatar" class="avatar" src="{{ url_for('static', filename='shibu.png') }}" alt="Your avatar"></a>
     <a id="loginBtn" href="/login" class="text-btn" style="text-decoration:none;">Sign in</a>
     <button id="logoutBtn" type="button" class="text-btn hidden">Log out</button>
   </div>
 </header>
 
-<div id="historyPanel" class="details hidden">
-  <div class="details-inner">
-    <h3 class="history-title">History</h3>
-    <p class="muted small">Your past questions in this browser. Click one to ask Shibu AI again.</p>
-    <ul id="historyList" class="history-list"></ul>
-    <p id="historyEmpty" class="muted small">No history yet — ask something first!</p>
+<div class="layout">
+<aside id="sidebar" class="sidebar">
+  <div class="sidebar-inner">
+    <button id="newChatBtn" type="button" class="text-btn" style="font-weight:700;">+ New chat</button>
+    <h3 class="history-title">Conversations</h3>
+    <p class="muted small">Click a past question to ask it again. Signed-in chats saved to the database appear here when DynamoDB is enabled; otherwise this browser's history is shown.</p>
+    <ul id="sidebarList" class="history-list"></ul>
+    <p id="sidebarEmpty" class="muted small">No history yet — ask something first!</p>
   </div>
-</div>
+</aside>
 
+<div class="main-col">
 <div id="details" class="details hidden">
   <div class="details-inner">
     <p><strong>Intent:</strong> <span id="exIntent">—</span> &nbsp;·&nbsp;
@@ -54,6 +58,8 @@
   </form>
   <p class="footnote">Type naturally — e.g. “What is Python?”, “Calculate 25% of 800”, “Search latest AI news”, or “Create a PDF about Python”.</p>
 </main>
+</div>
+</div>
 
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>
