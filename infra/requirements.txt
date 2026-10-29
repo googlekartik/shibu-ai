@@ -1,0 +1,3 @@
+# Only for the infrastructure script, NOT for the Shibu app itself.
+# The app (requirements.txt) does not need boto3 until Step 4.
+boto3>=1.34
