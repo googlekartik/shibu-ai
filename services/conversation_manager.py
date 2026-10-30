@@ -53,6 +53,36 @@ def language_instruction(language):
     return "Reply in English."
 
 
+def context_system_lines(context):
+    """Plain-language context for the LLM / RAG prompt, from the
+    session context only: name, preferences, rolling summary, the
+    current task, and explicit memories. Nothing secret is ever
+    included — memories hold only facts the user asked to remember.
+    Returns a list of short lines (possibly empty)."""
+    lines = []
+    name = getattr(context, "display_name", "") or ""
+    if name:
+        lines.append(f"The user's preferred name is {name}. Use it naturally when greeting them.")
+    prefs = getattr(context, "preferences", {}) or {}
+    tone, level = prefs.get("tone"), prefs.get("level")
+    if tone in ("simple", "concise", "detailed"):
+        lines.append(f"Answer style: {tone}.")
+    if level in ("beginner", "expert"):
+        lines.append(f"Knowledge level: {level}.")
+    summary = getattr(context, "summary", "") or ""
+    if summary:
+        lines.append(f"Conversation so far (summary): {summary[:400]}")
+    task = getattr(context, "active_task", "") or ""
+    if task:
+        lines.append(f"Current task: {task[:200]}")
+    memories = getattr(context, "memories", []) or []
+    if memories:
+        lines.append("Things the user asked you to remember (use only when relevant):")
+        for fact in list(memories)[:20]:
+            lines.append(f"- {fact[:200]}")
+    return lines
+
+
 def build_messages(context, user_message, max_turns=MAX_TURNS, max_chars=MAX_CHARS):
     """Build the message list for the LLM from stored history.
 
@@ -63,6 +93,9 @@ def build_messages(context, user_message, max_turns=MAX_TURNS, max_chars=MAX_CHA
     """
     language = detect_language(user_message)
     system = SYSTEM_PROMPT + " " + language_instruction(language)
+    extra = context_system_lines(context)
+    if extra:
+        system += " " + " ".join(extra)
     messages = [{"role": "system", "content": system}]
 
     history = []

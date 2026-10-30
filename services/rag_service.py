@@ -214,7 +214,7 @@ class RAGService:
             h["backend"] = "sqlite_fallback"
         return hits
 
-    def rag_answer(self, user_id: str, question: str, top_k: int = None):
+    def rag_answer(self, user_id: str, question: str, top_k: int = None, context=None):
         """Return {answer, sources, backend, evidence_found, error}.
         The LLM is called only with retrieved evidence; if the LLM
         is off, the retrieved passages themselves are returned,
@@ -241,12 +241,27 @@ class RAGService:
             answer = ("From your documents, the most relevant passages are:\n\n" + evidence +
                       "\n\nNote: No language model is enabled, so this is a direct retrieval result, not an AI-generated summary.")
             return {"answer": answer, "sources": sources, "backend": cfg["backend"], "evidence_found": True, "error": ""}
+        extra_lines = []
+        if context is not None:
+            try:
+                from services.conversation_manager import context_system_lines
+                extra_lines = context_system_lines(context)
+            except Exception:
+                extra_lines = []
+        system = ("Answer ONLY from the evidence below. If the evidence does not answer the question, say so plainly and do not invent facts. Cite sources by name in your answer.")
+        if extra_lines:
+            system += " Context: " + " ".join(extra_lines)
         messages = [
-            {"role": "system", "content": "Answer ONLY from the evidence below. If the evidence does not answer the question, say so plainly and do not invent facts. Cite sources by name in your answer."},
+            {"role": "system", "content": system},
             {"role": "user", "content": f"Evidence:\n{evidence}\n\nQuestion: {question}"},
         ]
         raw, err = manager.generate(messages, max_new_tokens=256, temperature=0.3)
         if err or not raw:
-            return {"answer": "", "sources": sources, "backend": cfg["backend"],
-                    "evidence_found": True, "error": err or "Language model returned nothing."}
+            # Evidence was found, so do not lose it: return the
+            # passages directly, labelled, instead of an error that
+            # makes the caller fall through and web-search instead.
+            answer = ("The language model could not summarise this time, so here are the most relevant passages from your documents:\n\n"
+                      + evidence +
+                      "\n\nNote: This is a direct retrieval result, not an AI-generated summary.")
+            return {"answer": answer, "sources": sources, "backend": cfg["backend"], "evidence_found": True, "error": ""}
         return {"answer": raw, "sources": sources, "backend": cfg["backend"], "evidence_found": True, "error": ""}

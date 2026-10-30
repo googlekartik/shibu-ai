@@ -98,6 +98,46 @@ def _file_payload(text, intent, rule_id, tool, action, filename, processing_ms):
         processing_ms=processing_ms)
 
 
+_SECRET_MEMORY_PATTERNS = re.compile(
+    r"\b(password|api key|secret|access token|otp|one-time code|credit card|bank account)\b", re.I)
+
+
+def _memory_command(text, context):
+    """Explicit-memory commands, or None when this is not one.
+
+    Only facts the user explicitly asks to remember are stored, in
+    the session context (persisted per-user by app.py). Secrets are
+    refused, never stored. Returns a dict with kind + text details.
+    """
+    low = text.strip().lower()
+    # List what is remembered.
+    if re.fullmatch(r"(what do you remember( about me)?|what have you remembered|"
+                    r"show( me)?( my)? memories|list( what you remember| my memories)?)\??", low):
+        return {"kind": "list"}
+    # Forget everything.
+    if re.fullmatch(r"(forget everything( you remember( about me)?)?|forget all( my)? memories|"
+                    r"clear( my)? memories|forget everything about me)\.?", low):
+        return {"kind": "clear"}
+    # Forget one fact (by words it contains).
+    m_forget = re.match(r"^(?:please\s+)?forget\s+(?:that\s+)?(.+?)\.?\s*$", low)
+    if m_forget and m_forget.group(1) not in ("it", "that", "this"):
+        return {"kind": "forget", "query": m_forget.group(1).strip()}
+    # Remember one fact.
+    m_rem = re.match(r"^(?:please\s+)?remember\s+(?:that\s+|this:?\s*)?(.+?)\.?\s*$", text.strip(), re.I)
+    if m_rem:
+        fact = " ".join(m_rem.group(1).strip().split())
+        if not fact or fact.lower() in ("it", "that", "this"):
+            return {"kind": "clarify",
+                    "question": "What should I remember? For example: 'Remember that I prefer simple explanations.'"}
+        if _SECRET_MEMORY_PATTERNS.search(fact):
+            return {"kind": "refused",
+                    "question": ("I won't store passwords, keys, tokens or card details as a memory — "
+                                "those belong only in your .env file or password manager, never in chat. "
+                                "Tell me something else to remember, and I'll save that instead.")}
+        return {"kind": "save", "fact": fact}
+    return None
+
+
 def _llm_answer(user_message: str, context, processing_ms=0.0):
     """Try a conversational LLM answer.
 
@@ -424,6 +464,42 @@ def process_single_message(message: str, context, processing_ms=0.0):
         payload = format_response(text=f"Your saved preferences are: tone={context.preferences.get('tone')}, level={context.preferences.get('level')}. Say e.g. 'set tone to simple' or 'expert level' to change them.",
             intent="PREFERENCE", rule_id="preference_show", confidence=0.95, tool="Preferences", action="Show preferences", processing_ms=processing_ms)
         context.add_exchange(text, payload["response"], "PREFERENCE", "preference_show", 0.95)
+        return payload
+
+    # 5b2) Explicit memory: "remember that ...", "what do you
+    # remember?", "forget ...". Stored only when the user asks, in
+    # the session context; app.py persists it per-user in SQLite.
+    _mem = _memory_command(text, context)
+    if _mem is not None:
+        if _mem["kind"] == "save":
+            saved = context.remember(_mem["fact"])
+            _txt = (f"Got it — I'll remember: {_mem['fact']}" if saved
+                    else f"I'm already remembering: {_mem['fact']}")
+            _rid = "memory_save"
+        elif _mem["kind"] == "list":
+            if not context.memories:
+                _txt = ("I haven't been asked to remember anything about you yet. "
+                        "Say e.g. 'Remember that I prefer simple explanations' and I'll save it. "
+                        "Say 'Forget that' to remove it later.")
+            else:
+                _txt = "Here's what you've asked me to remember:\n" + "\n".join(f"- {f}" for f in context.memories)
+            _rid = "memory_list"
+        elif _mem["kind"] == "clear":
+            _n = context.forget_all_memories()
+            _txt = ("Done — I've forgotten everything you asked me to remember."
+                    if _n else "There was nothing saved to forget.")
+            _rid = "memory_forget"
+        elif _mem["kind"] == "forget":
+            _n = context.forget_matching(_mem["query"])
+            _txt = (f"Done — I forgot {_n} saved memory/memories about '{_mem['query']}'."
+                    if _n else f"I couldn't find a saved memory about '{_mem['query']}'. Say 'What do you remember about me?' to see what's saved.")
+            _rid = "memory_forget"
+        else:  # clarify / refused
+            _txt = _mem["question"]
+            _rid = "memory_refused" if _mem["kind"] == "refused" else "clarify_memory"
+        payload = format_response(text=_txt, intent="MEMORY", rule_id=_rid, confidence=0.95,
+            tool="Memory", action="Explicit memory", processing_ms=processing_ms)
+        context.add_exchange(text, payload["response"], "MEMORY", _rid, 0.95)
         return payload
 
     # 5c) Clarifying questions for vague input (do not guess)

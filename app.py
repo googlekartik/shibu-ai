@@ -102,6 +102,34 @@ def _save_chat_to_sqlite(user_message, payload):
                            sources=payload.get("sources", []))
     except Exception:
         logger.exception("SQLite chat save failed (chat still returned)")
+    # Persist explicit memories only after the context has been
+    # restored for this session (see _restore_context), so an
+    # unrestored empty list can never wipe stored memories.
+    if user_id and session.get("context_restored_v1"):
+        try:
+            _sqlite_store().replace_memories(user_id, list(getattr(_context(), "memories", []) or []))
+        except Exception:
+            logger.exception("SQLite memory save failed (chat still returned)")
+
+
+def _restore_context(ctx, user_id, display_name=""):
+    """First logged-in chat in a session: load explicit memories and
+    the most recent saved conversation into the in-memory context,
+    so follow-ups and the LLM see more than this browser session.
+    Runs once per Flask session (session flag); /api/clear sets the
+    flag too, so clearing is not undone by a restore."""
+    if session.get("context_restored_v1"):
+        return
+    session["context_restored_v1"] = True
+    if display_name:
+        ctx.display_name = display_name
+    try:
+        store = _sqlite_store()
+        ctx.memories = store.list_memories(user_id)
+        msgs = store.latest_conversation_messages(user_id, limit=12)
+        ctx.restore_from_messages([{"role": m.get("role"), "text": m.get("text", "")} for m in msgs])
+    except Exception:
+        logger.exception("SQLite context restore failed (chat still returned)")
 
 
 def _session_user_id():
@@ -303,6 +331,12 @@ def chat():
             return jsonify(payload)
         if profile["onboarding_stage"] == "ask_goal":
             _save_profile(onboarding_completed=True, onboarding_stage=None)
+    # Smaller memory upgrade: restore memories + recent history once
+    # per session for logged-in users, before RAG / router run.
+    if profile["logged_in"]:
+        _restore_context(ctx, _session_user_id(), profile["display_name"])
+        if profile["display_name"]:
+            ctx.display_name = profile["display_name"]
     # RAG attempt, AFTER onboarding and BEFORE the cache/router:
     # rules and maths keep priority (see below: RAG only runs when
     # the rule match is UNKNOWN / low-confidence, or the user
@@ -320,7 +354,7 @@ def chat():
         if (_forced_doc or _rule_rag.get("intent") == "UNKNOWN" or _rule_rag.get("rule_id") == "definition"
                 or float(_rule_rag.get("confidence") or 0) < 0.45):
             try:
-                _rag = _rag_service().rag_answer(_session_user_id(), message_or_error)
+                _rag = _rag_service().rag_answer(_session_user_id(), message_or_error, context=ctx)
             except Exception:
                 _rag = {"evidence_found": False, "error": "RAG unavailable"}
             if _rag.get("evidence_found") and not _rag.get("error"):
@@ -533,6 +567,9 @@ def history():
 @app.route("/api/clear", methods=["POST"])
 def clear():
     contexts.clear(_session_id())
+    # Do not restore the cleared history on the next chat in this
+    # session; explicit memories are kept (see ConversationContext.clear).
+    session["context_restored_v1"] = True
     return jsonify({"status": "cleared"})
 
 
@@ -593,6 +630,7 @@ def google_logout():
     session.pop("google_display_name", None)
     session.pop("google_email", None)
     session.pop("sqlite_conversation_id", None)
+    session.pop("context_restored_v1", None)
     session.pop("profile_avatar_id", None)
     session.pop("onboarding_completed", None)
     session.pop("onboarding_stage", None)

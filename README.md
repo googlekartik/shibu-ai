@@ -351,3 +351,40 @@ created, changed, or deleted, and no paid usage was incurred.
   200 (backend sqlite, pinecone_configured false), anonymous
   /api/rag/search 401, anonymous /api/chat rule answer 200.
   No fine-tuning was run, per this task.
+
+## 27. Smaller memory upgrade — smarter answers, remember more (2026-10-31, local only — NOT pushed to GitHub)
+
+Smaller version first, as Kartik chose. No resume-UI, no New Chat
+button, no LLM polishing of rule answers, no auto-learning.
+
+- **LLM context** (`services/conversation_manager.py`):
+  `build_messages()` now adds the rolling summary, preferred
+  name, tone/level, current task, and explicit memories to the
+  system prompt. RAG grounded prompts get the same context
+  (`rag_answer(..., context=ctx)`). History trimming (last 6
+  turns / 6000 chars) is unchanged.
+- **Explicit memories only** (`chatbot/context.py`,
+  `chatbot/router.py` step 5b2, `services/sqlite_store.py`
+  table `user_memories`): "Remember that ..." saves a fact,
+  "What do you remember about me?" lists it, "Forget ..." /
+  "Forget everything" removes it. Facts are capped at 20, 200
+  chars each, deduped, scoped by google#sub. Passwords, keys,
+  tokens and card details are refused, never stored. Nothing
+  is inferred from chat; /api/clear keeps memories.
+- **Restore on login** (`app.py` `_restore_context`, once per
+  Flask session): logged-in users get their stored memories
+  plus the last 12 messages (6 pairs) of their most recent
+  SQLite conversation loaded into the session context, so a
+  follow-up like "add 967464 in previous answer" works in a
+  fresh session. Anonymous chat is never restored or saved.
+  Limit: on Render free, SQLite is ephemeral — restore works
+  until the next redeploy wipes data/shibu.db; on a PC it
+  persists.
+- **RAG fallback** (`services/rag_service.py`): if evidence was
+  found but the LLM call fails, the retrieved passages are
+  returned labelled as a direct retrieval result, instead of
+  the evidence being lost to a web fallback.
+- **Tests**: 99 pytest passed (89 previous + 10 new in
+  tests/test_memory_smarter_2026.py). Live Flask: / 200,
+  /api/rag/status sqlite, remember/list in one session 200,
+  maths + cross-session running total 1017397 verified in tests.

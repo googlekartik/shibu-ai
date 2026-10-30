@@ -63,6 +63,68 @@ class ConversationContext:
         self.last_document = ""       # filename
         self.last_document_text = ""  # extracted plain text
         self.last_document_info = {}  # e.g. {"type": "xlsx", "sheets": [...], "analysis": {...}}
+        # Explicit long-term memories: only facts the user asked Shibu
+        # to remember ("remember that ..."). Never inferred, never a
+        # secret. Persisted per-user in SQLite by app.py; in this
+        # session object they are just a capped list of plain strings.
+        self.display_name = ""
+        self.memories = []
+        self.restored_from_sqlite = False
+
+    def remember(self, fact: str) -> bool:
+        """Store one explicit memory. False when empty/duplicate/too long."""
+        fact = " ".join((fact or "").strip().split())
+        if not fact or len(fact) > 200:
+            return False
+        if any(f.lower() == fact.lower() for f in self.memories):
+            return False
+        self.memories.append(fact)
+        self.memories = self.memories[-20:]
+        return True
+
+    def forget_matching(self, query: str) -> int:
+        """Remove memories containing `query` (case-insensitive)."""
+        q = " ".join((query or "").strip().split()).lower()
+        if not q:
+            return 0
+        before = len(self.memories)
+        self.memories = [f for f in self.memories if q not in f.lower()]
+        return before - len(self.memories)
+
+    def forget_all_memories(self) -> int:
+        count = len(self.memories)
+        self.memories = []
+        return count
+
+    def restore_from_messages(self, messages):
+        """Restore recent history saved in SQLite into this session.
+
+        `messages` are dicts {role, text, ...} in chronological order.
+        Only the last 12 entries (6 pairs) are restored, so a long
+        old conversation cannot flood the LLM context. This only
+        fills the in-memory context used for follow-ups and LLM
+        prompts; it does not re-save the messages to SQLite.
+        """
+        rows = [m for m in (messages or []) if m.get("text")]
+        rows = rows[-12:]
+        if not rows:
+            return False
+        self.conversation_history = [
+            {"role": ("bot" if m.get("role") == "bot" else "user"),
+             "text": m["text"]} for m in rows]
+        users = [m["text"] for m in rows if m.get("role") == "user"]
+        bots = [m["text"] for m in rows if m.get("role") == "bot"]
+        if users:
+            self.last_user_message = users[-1]
+        if bots:
+            self.last_bot_response = bots[-1]
+            self.last_main_response = bots[-1]
+            value = _extract_numeric_answer(bots[-1])
+            if value is not None:
+                self.last_numeric_value = value
+                self.active_task = f"Running calculation — last result {_fmt_num(value)}"
+        self.restored_from_sqlite = True
+        return True
 
     def add_exchange(self, user_message, bot_response, intent="", rule_id="",
                      confidence=0.0, topic=""):
@@ -116,7 +178,14 @@ class ConversationContext:
         return pairs[-n:]
 
     def clear(self):
+        # Clear the conversation, but keep explicit memories and the
+        # display name: "clear chat" is not "forget everything about
+        # me". Memories are removed only via "forget ...".
+        memories = list(self.memories)
+        display_name = self.display_name
         self.__init__()
+        self.memories = memories
+        self.display_name = display_name
 
     def to_dict(self):
         return {
@@ -132,6 +201,9 @@ class ConversationContext:
             "summary": self.summary,
             "recent_pairs": self.recent_pairs(),
             "active_task": self.active_task,
+            "display_name": self.display_name,
+            "memories": list(self.memories),
+            "restored_from_sqlite": self.restored_from_sqlite,
             "last_numeric_answer": (_fmt_num(self.last_numeric_value)
                                      if self.last_numeric_value is not None else None),
         }

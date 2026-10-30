@@ -87,6 +87,14 @@ CREATE TABLE IF NOT EXISTS messages (
     FOREIGN KEY (conversation_id) REFERENCES conversations(conversation_id)
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, created_at);
+CREATE TABLE IF NOT EXISTS user_memories (
+    memory_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    fact_text TEXT NOT NULL,
+    created_at REAL,
+    FOREIGN KEY (user_id) REFERENCES users(user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_memories_user ON user_memories(user_id, created_at);
 """
 
 
@@ -233,6 +241,44 @@ class SQLiteStore:
             "SELECT * FROM messages WHERE conversation_id=? AND user_id=? ORDER BY created_at ASC LIMIT ?",
             (conversation_id, user_id, limit)).fetchall()
         return [dict(r) for r in rows]
+
+    # -- explicit memories (only facts the user asked to remember) --
+    def list_memories(self, user_id: str):
+        rows = self._conn.execute(
+            "SELECT fact_text FROM user_memories WHERE user_id=? ORDER BY created_at ASC",
+            (user_id,)).fetchall()
+        return [r["fact_text"] for r in rows]
+
+    def replace_memories(self, user_id: str, facts: list):
+        """Replace the user's stored facts with `facts` (deduped, capped).
+
+        Called by app.py after a chat, once the session context has
+        been restored, so it never wipes memories that were only not
+        yet loaded. Every query is scoped by user_id.
+        """
+        self._ensure_user(user_id)
+        seen, clean = set(), []
+        for fact in facts or []:
+            fact = " ".join(str(fact).strip().split())
+            if fact and len(fact) <= 200 and fact.lower() not in seen:
+                seen.add(fact.lower())
+                clean.append(fact)
+        clean = clean[-20:]
+        self._conn.execute("DELETE FROM user_memories WHERE user_id=?", (user_id,))
+        now = self._now()
+        for fact in clean:
+            self._conn.execute(
+                "INSERT INTO user_memories (memory_id, user_id, fact_text, created_at) VALUES (?,?,?,?)",
+                (uuid.uuid4().hex, user_id, fact, now))
+        self._conn.commit()
+        return list(clean)
+
+    def latest_conversation_messages(self, user_id: str, limit: int = 12):
+        """Messages of the user's most recent conversation, oldest first."""
+        convs = self.list_conversations(user_id, limit=1)
+        if not convs:
+            return []
+        return self.list_messages(user_id, convs[0]["conversation_id"], limit=limit)
 
     def migrate_session_history(self, user_id: str, exchanges: list, confirm: bool = False):
         """Explicit migration only. confirm=False does nothing and
