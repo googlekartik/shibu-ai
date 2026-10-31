@@ -141,9 +141,14 @@ class ModelManager:
         self.openai_key = (openai_key if openai_key is not None else os.environ.get("OPENAI_API_KEY", "")).strip()
         self.openai_model = (os.environ.get("OPENAI_MODEL", "").strip() or "gpt-4o-mini")
         self.token = (token if token is not None else os.environ.get("HF_TOKEN", "")).strip()
-        self.use_local = (use_local if use_local is not None
-                          else os.environ.get("HF_USE_LOCAL", "").strip() in ("1", "true", "yes"))
-        self.force_local = os.environ.get("HF_FORCE_LOCAL", "").strip() in ("1", "true", "yes")
+        self.cloud_only = os.environ.get("CLOUD_ONLY", "").strip().lower() in ("1", "true", "yes")
+        requested_local = (use_local if use_local is not None
+                           else os.environ.get("HF_USE_LOCAL", "").strip() in ("1", "true", "yes"))
+        requested_force_local = os.environ.get("HF_FORCE_LOCAL", "").strip() in ("1", "true", "yes")
+        # Render production uses hosted APIs only.  Local mode remains available
+        # for existing development installs when CLOUD_ONLY is not set.
+        self.use_local = bool(requested_local) and not self.cloud_only
+        self.force_local = bool(requested_force_local) and not self.cloud_only
         # Optional explicit provider, e.g. featherless-ai, novita, auto.
         # The router needs a provider for many models: a plain model name
         # can fail with "not supported by any provider you have enabled"
@@ -186,17 +191,22 @@ class ModelManager:
             "device": self._device if self.mode == "local" else ("api" if self.mode in ("api", "openai") else None),
             "ram_gb": round(ram, 1) if ram else None,
             "gpu": _has_gpu(),
+            "cloud_only": self.cloud_only,
             "cached": is_cached(self.model_id) if self.mode == "local" and self.model_id else None,
             "recommendation": self._recommendation,
             "error": self._load_error,
         }
         if self.mode == "off":
-            info["how_to_enable"] = (
-                "For the fastest answer, set OPENAI_API_KEY in .env (ChatGPT API, gpt-4o-mini). "
-                "Or set HF_TOKEN in a .env file to use the Hugging Face API, "
-                "or set HF_USE_LOCAL=1 and install requirements-llm.txt to run a small "
-                "model on this PC. Until then, Shibu AI answers from its rule engine."
-            )
+            if self.cloud_only:
+                info["how_to_enable"] = (
+                    "This deployment is cloud-only. Set OPENAI_API_KEY for gpt-4o-mini "
+                    "or HF_TOKEN for Hugging Face hosted inference in the service environment.")
+            else:
+                info["how_to_enable"] = (
+                    "For the fastest answer, set OPENAI_API_KEY in .env (ChatGPT API, gpt-4o-mini). "
+                    "Or set HF_TOKEN in a .env file to use the Hugging Face API, "
+                    "or set HF_USE_LOCAL=1 and install requirements-llm.txt to run a small "
+                    "model on this PC. Until then, Shibu AI answers from its rule engine.")
         return info
 
     def select(self):

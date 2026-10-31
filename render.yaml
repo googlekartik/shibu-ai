@@ -4,11 +4,18 @@ services:
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: python app.py
+    startCommand: gunicorn --workers 1 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT app:app
+    healthCheckPath: /api/health
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.0
       - key: HOST
         value: 0.0.0.0
+      - key: CLOUD_ONLY
+        value: "true"
+      - key: HF_USE_LOCAL
+        value: "0"
+      - key: RAG_BACKEND
+        value: auto
       # Set these in the Render dashboard (never in git):
       # OPENAI_API_KEY, HF_TOKEN, SECRET_KEY

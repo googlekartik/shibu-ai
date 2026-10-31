@@ -17,22 +17,33 @@ from __future__ import annotations
 
 import os
 
+from services.retry import retry_cloud_call
+
 
 class EmbeddingError(Exception):
     pass
 
 
-def _post_json(url: str, headers: dict, payload: dict):
+def _post_json(url: str, headers: dict, payload: dict, attempts: int = 3):
     import requests
-    resp = requests.post(url, headers=headers, json=payload, timeout=60)
-    if resp.status_code != 200:
+
+    def send():
         try:
-            msg = resp.json().get("error", {})
-            msg = msg.get("message", "") if isinstance(msg, dict) else str(msg)
-        except Exception:
-            msg = resp.text[:300]
-        raise EmbeddingError(f"Embedding API returned HTTP {resp.status_code}: {msg}"[:300])
-    return resp.json()
+            resp = requests.post(url, headers=headers, json=payload, timeout=(5, 60))
+        except requests.RequestException as exc:
+            raise EmbeddingError(f"Embedding API request failed: {exc}"[:300]) from exc
+        if resp.status_code != 200:
+            try:
+                msg = resp.json().get("error", {})
+                msg = msg.get("message", "") if isinstance(msg, dict) else str(msg)
+            except Exception:
+                msg = resp.text[:300]
+            error = EmbeddingError(f"Embedding API returned HTTP {resp.status_code}: {msg}"[:300])
+            error.status_code = resp.status_code
+            raise error
+        return resp.json()
+
+    return retry_cloud_call(send, attempts=attempts)
 
 
 class OpenAIEmbedder:
@@ -40,7 +51,7 @@ class OpenAIEmbedder:
         self.api_key = (api_key if api_key is not None else os.environ.get("OPENAI_API_KEY", "")).strip()
         self.model = (model or os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")).strip()
 
-    def embed(self, texts: list) -> list:
+    def embed(self, texts: list, input_type: str = "passage", attempts: int = 3) -> list:
         if not self.api_key:
             raise EmbeddingError("OPENAI_API_KEY is not set; cannot generate embeddings.")
         if not texts:
@@ -48,7 +59,7 @@ class OpenAIEmbedder:
         data = _post_json(
             "https://api.openai.com/v1/embeddings",
             {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-            {"model": self.model, "input": texts})
+            {"model": self.model, "input": texts}, attempts=attempts)
         items = sorted(data.get("data", []), key=lambda x: x.get("index", 0))
         if len(items) != len(texts):
             raise EmbeddingError("Embedding API returned a different number of vectors than requested.")
@@ -60,7 +71,7 @@ class PineconeInferenceEmbedder:
         self.api_key = (api_key if api_key is not None else os.environ.get("PINECONE_API_KEY", "")).strip()
         self.model = (model or os.environ.get("EMBEDDING_MODEL", "multilingual-e5-large")).strip()
 
-    def embed(self, texts: list, input_type: str = "passage") -> list:
+    def embed(self, texts: list, input_type: str = "passage", attempts: int = 3) -> list:
         if not self.api_key:
             raise EmbeddingError("PINECONE_API_KEY is not set; cannot generate embeddings.")
         if not texts:
@@ -69,7 +80,7 @@ class PineconeInferenceEmbedder:
             "https://api.pinecone.io/embed",
             {"Api-Key": self.api_key, "Content-Type": "application/json"},
             {"model": self.model, "parameters": {"input_type": input_type, "truncate": "END"},
-             "inputs": [{"text": t} for t in texts]})
+             "inputs": [{"text": t} for t in texts]}, attempts=attempts)
         items = data.get("data", [])
         if len(items) != len(texts):
             raise EmbeddingError("Pinecone Inference returned a different number of vectors than requested.")

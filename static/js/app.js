@@ -93,6 +93,27 @@ function addMessage(text, role, extra, saveHistory = true) {
     });
     div.appendChild(qa);
   }
+  if (role === "bot" && extra && Array.isArray(extra.sources) && extra.sources.length) {
+    const sourceWrap = document.createElement("div");
+    sourceWrap.className = "sources";
+    const sourceTitle = document.createElement("div");
+    sourceTitle.className = "source-title";
+    sourceTitle.textContent = "Sources";
+    sourceWrap.appendChild(sourceTitle);
+    extra.sources.forEach(source => {
+      const line = document.createElement(source.url ? "a" : "div");
+      line.className = "source-item";
+      if (source.url) { line.href = source.url; line.target = "_blank"; line.rel = "noopener noreferrer"; }
+      const parts = [];
+      if (source.citation) parts.push("[" + source.citation + "]");
+      if (source.source_name) parts.push(source.source_name);
+      if (source.chunk_index !== undefined && source.chunk_index !== null) parts.push("chunk " + source.chunk_index);
+      if (source.score !== undefined) parts.push("relevance " + Math.round(Number(source.score) * 100) + "%");
+      line.textContent = parts.join(" · ") || "Source";
+      sourceWrap.appendChild(line);
+    });
+    div.appendChild(sourceWrap);
+  }
   if (role === "bot") {
     const tools = document.createElement("div");
     tools.className = "tools";
@@ -157,7 +178,9 @@ document.getElementById("fileInput").addEventListener("change", async (e) => {
     const data = await res.json();
     typingEl.classList.add("hidden");
     if (!res.ok) { addMessage("Upload failed: " + (data.error || "Unknown error."), "bot"); return; }
-    addMessage(data.message + "\n\nPreview: " + data.summary_preview, "bot");
+    let uploadMessage = data.message + "\n\nPreview: " + data.summary_preview;
+    if (data.rag && data.rag.status === "failed") uploadMessage += "\n\nDocument preview is ready, but semantic indexing is unavailable: " + (data.rag.error || "try again later.");
+    addMessage(uploadMessage, "bot", data);
   } catch (err) {
     typingEl.classList.add("hidden");
     addMessage("Upload failed: could not reach the server.", "bot");

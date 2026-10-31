@@ -52,6 +52,11 @@ CREATE TABLE IF NOT EXISTS documents (
     chunk_count INTEGER DEFAULT 0,
     error TEXT DEFAULT '',
     full_text TEXT DEFAULT '',
+    source_key TEXT DEFAULT '',
+    content_sha256 TEXT DEFAULT '',
+    embedding_provider TEXT DEFAULT '',
+    embedding_model TEXT DEFAULT '',
+    embedding_version TEXT DEFAULT '',
     created_at REAL, updated_at REAL,
     FOREIGN KEY (user_id) REFERENCES users(user_id)
 );
@@ -106,7 +111,23 @@ class SQLiteStore:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.executescript(SCHEMA)
+        self._migrate_document_columns()
         self._conn.commit()
+
+    def _migrate_document_columns(self):
+        """Add RAG provenance columns to databases created by older releases."""
+        existing = {row[1] for row in self._conn.execute("PRAGMA table_info(documents)").fetchall()}
+        migrations = {
+            "source_key": "TEXT DEFAULT ''",
+            "content_sha256": "TEXT DEFAULT ''",
+            "embedding_provider": "TEXT DEFAULT ''",
+            "embedding_model": "TEXT DEFAULT ''",
+            "embedding_version": "TEXT DEFAULT ''",
+        }
+        for name, definition in migrations.items():
+            if name not in existing:
+                self._conn.execute(f"ALTER TABLE documents ADD COLUMN {name} {definition}")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_user_source ON documents(user_id, source_key)")
 
     def _now(self):
         return time.time()
@@ -146,25 +167,31 @@ class SQLiteStore:
 
     # -- documents --------------------------------------------------
     def save_document(self, user_id: str, document_id: str, source_name: str, source_type: str,
-                      full_text: str, chunks: list, status: str = "indexed", error: str = ""):
+                      full_text: str, chunks: list, status: str = "indexed", error: str = "",
+                      provenance: dict = None):
         self._ensure_user(user_id)
         now = self._now()
+        provenance = provenance or {}
         self._conn.execute(
-            "INSERT OR REPLACE INTO documents (document_id, user_id, source_name, source_type, status, chunk_count, error, full_text, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (document_id, user_id, source_name, source_type, status, len(chunks), error, full_text or "", now, now))
+            "INSERT OR REPLACE INTO documents (document_id, user_id, source_name, source_type, status, chunk_count, error, full_text, source_key, content_sha256, embedding_provider, embedding_model, embedding_version, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (document_id, user_id, source_name, source_type, status, len(chunks), error, full_text or "",
+             provenance.get("source_key", ""), provenance.get("content_sha256", ""),
+             provenance.get("embedding_provider", ""), provenance.get("embedding_model", ""),
+             provenance.get("embedding_version", ""), now, now))
         self._conn.execute("DELETE FROM document_chunks WHERE document_id=? AND user_id=?", (document_id, user_id))
         for c in chunks:
             self._conn.execute(
                 "INSERT OR REPLACE INTO document_chunks (chunk_id, document_id, user_id, chunk_index, text, metadata_json) VALUES (?,?,?,?,?,?)",
                 (c["id"], document_id, user_id, c["chunk_index"], c["text"],
-                 json.dumps({"source_name": source_name, "char_start": c.get("char_start", 0), "char_end": c.get("char_end", 0)})))
+                 json.dumps({"source_name": source_name, "chunk_index": c["chunk_index"],
+                             "char_start": c.get("char_start", 0), "char_end": c.get("char_end", 0)})))
         self._conn.commit()
         return self.get_document(user_id, document_id)
 
     def get_document(self, user_id: str, document_id: str):
         row = self._conn.execute(
-            "SELECT document_id, user_id, source_name, source_type, status, chunk_count, error, created_at, updated_at FROM documents WHERE document_id=? AND user_id=?",
+            "SELECT document_id, user_id, source_name, source_type, status, chunk_count, error, source_key, content_sha256, embedding_provider, embedding_model, embedding_version, created_at, updated_at FROM documents WHERE document_id=? AND user_id=?",
             (document_id, user_id)).fetchone()
         return dict(row) if row else None
 
@@ -173,9 +200,15 @@ class SQLiteStore:
             "SELECT * FROM documents WHERE document_id=? AND user_id=?", (document_id, user_id)).fetchone()
         return dict(row) if row else None
 
+    def get_document_by_source_key(self, user_id: str, source_key: str):
+        row = self._conn.execute(
+            "SELECT * FROM documents WHERE user_id=? AND source_key=? ORDER BY updated_at DESC LIMIT 1",
+            (user_id, source_key)).fetchone()
+        return dict(row) if row else None
+
     def list_documents(self, user_id: str):
         rows = self._conn.execute(
-            "SELECT document_id, user_id, source_name, source_type, status, chunk_count, error, created_at, updated_at FROM documents WHERE user_id=? ORDER BY updated_at DESC",
+            "SELECT document_id, user_id, source_name, source_type, status, chunk_count, error, source_key, content_sha256, embedding_provider, embedding_model, embedding_version, created_at, updated_at FROM documents WHERE user_id=? ORDER BY updated_at DESC",
             (user_id,)).fetchall()
         return [dict(r) for r in rows]
 
@@ -185,7 +218,8 @@ class SQLiteStore:
         self._conn.commit()
         return cur2.rowcount > 0
 
-    def search_chunks_fallback(self, user_id: str, query: str, top_k: int = 5) -> list:
+    def search_chunks_fallback(self, user_id: str, query: str, top_k: int = 5,
+                               document_id: str = None, source_name: str = None) -> list:
         """SQLite fallback retrieval — token overlap, NOT embeddings,
         and labelled as such by callers. Used only when the backend
         is sqlite (development / automated tests). Pinecone queries
@@ -194,18 +228,28 @@ class SQLiteStore:
         qwords = set(re.findall(r"[a-z]{3,}", (query or "").lower()))
         if not qwords:
             return []
+        conditions = ["c.user_id=?"]
+        values = [user_id]
+        if document_id:
+            conditions.append("c.document_id=?")
+            values.append(document_id)
+        if source_name:
+            conditions.append("d.source_name=?")
+            values.append(source_name)
         rows = self._conn.execute(
             "SELECT c.chunk_id, c.document_id, c.text, c.metadata_json, d.source_name FROM document_chunks c "
-            "JOIN documents d ON d.document_id=c.document_id WHERE c.user_id=?", (user_id,)).fetchall()
+            "JOIN documents d ON d.document_id=c.document_id WHERE " + " AND ".join(conditions), values).fetchall()
         scored = []
         for r in rows:
             words = set(re.findall(r"[a-z]{3,}", r["text"].lower()))
             overlap = len(qwords & words)
             if overlap:
+                metadata = json.loads(r["metadata_json"] or "{}")
                 scored.append({"id": r["chunk_id"], "document_id": r["document_id"],
                                "score": overlap / max(1, len(qwords)),
                                "text": r["text"], "source_name": r["source_name"],
-                               "metadata": json.loads(r["metadata_json"] or "{}")})
+                               "metadata": metadata,
+                               "chunk_index": metadata.get("chunk_index")})
         scored.sort(key=lambda x: (-x["score"], x["document_id"]))
         return scored[:top_k]
 

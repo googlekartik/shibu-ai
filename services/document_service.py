@@ -8,7 +8,19 @@ that share the most words with the question). The bot says this honestly.
 import os
 import re
 import statistics
+import html as html_lib
 from collections import Counter
+
+
+SUPPORTED_DOCUMENT_EXTENSIONS = (".pdf", ".docx", ".xlsx", ".txt", ".md", ".html", ".htm", ".csv")
+
+
+def clean_extracted_text(text: str) -> str:
+    """Normalize extraction output without changing its meaning or citations."""
+    text = (text or "").replace("\x00", " ")
+    text = re.sub(r"[\t\r ]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 def extract_text(path: str, ext: str):
@@ -21,12 +33,20 @@ def extract_text(path: str, ext: str):
         for page in reader.pages:
             pages.append(page.extract_text() or "")
         text = "\n".join(pages)
-        return text, {"type": "pdf", "pages": len(reader.pages)}
+        return clean_extracted_text(text), {"type": "pdf", "pages": len(reader.pages)}
     if ext == ".docx":
         from docx import Document
         doc = Document(path)
         text = "\n".join(p.text for p in doc.paragraphs)
-        return text, {"type": "docx", "paragraphs": len(doc.paragraphs)}
+        # Tables frequently carry the useful information in a DOCX.
+        table_lines = []
+        for table in doc.tables:
+            for row in table.rows:
+                table_lines.append(" | ".join(cell.text.strip() for cell in row.cells))
+        if table_lines:
+            text = text + "\n" + "\n".join(table_lines)
+        return clean_extracted_text(text), {"type": "docx", "paragraphs": len(doc.paragraphs),
+                                            "tables": len(doc.tables)}
     if ext == ".xlsx":
         from openpyxl import load_workbook
         wb = load_workbook(path, data_only=True)
@@ -49,8 +69,18 @@ def extract_text(path: str, ext: str):
                             "mean": round(statistics.mean(nums), 2),
                             "min": min(nums), "max": max(nums), "trend": trend,
                         }
-        return "\n".join(lines), {"type": "xlsx", "sheets": wb.sheetnames, "analysis": analysis}
-    raise ValueError(f"Unsupported file type: {ext}. Use PDF, DOCX or XLSX.")
+        return clean_extracted_text("\n".join(lines)), {"type": "xlsx", "sheets": wb.sheetnames, "analysis": analysis}
+    if ext in (".txt", ".md", ".csv"):
+        with open(path, "r", encoding="utf-8", errors="ignore") as file:
+            text = file.read()
+        return clean_extracted_text(text), {"type": ext.lstrip("."), "characters": len(text)}
+    if ext in (".html", ".htm"):
+        with open(path, "r", encoding="utf-8", errors="ignore") as file:
+            raw = file.read()
+        raw = re.sub(r"<script.*?</script>|<style.*?</style>", " ", raw, flags=re.S | re.I)
+        text = html_lib.unescape(re.sub(r"<[^>]+>", " ", raw))
+        return clean_extracted_text(text), {"type": "html", "characters": len(text)}
+    raise ValueError("Unsupported file type. Use PDF, DOCX, XLSX, TXT, Markdown, HTML or CSV.")
 
 
 def split_sentences(text: str):

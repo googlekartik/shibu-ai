@@ -1,5 +1,6 @@
 Flask>=3.0
 Flask-CORS>=4.0
+gunicorn>=23.0
 python-dotenv>=1.0
 SymPy>=1.12
 ReportLab>=4.0

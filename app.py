@@ -21,19 +21,23 @@ from services.response_generator import validate_llm_answer, format_llm_answer
 from services.math_service import MathService
 from services.pdf_service import PDFService
 from services.web_search_service import WebSearchService
-from services.document_service import extract_text, summarize as summarize_doc, answer_from_document
+from services.document_service import (extract_text, summarize as summarize_doc,
+                                       answer_from_document, SUPPORTED_DOCUMENT_EXTENSIONS)
 from services.file_generation_service import generate_pptx, generate_docx, generate_xlsx
 from services.cache_service import (cached_answer_lookup, cached_answer_store,
                                     looks_personal, normalize_query)
 from services.rag_config import get_rag_config
 from services.rag_service import RAGService
+from services.request_router import plan_request
+from services.request_limiter import request_limiter
+from services.retrieval_metrics import retrieval_metrics
 from services.sqlite_store import SQLiteStore
 from services.math_service import looks_like_math
 from chatbot.rule_engine import match_rule
 from services.google_auth import (build_authorization_url, exchange_code,
                                   google_config, google_user_id, new_state,
                                   verify_id_token)
-from utils.security import sanitize_filename
+from utils.security import sanitize_filename, safe_join
 from utils.logger import Timer, get_logger, log_chat
 from utils.security import MAX_PDF_TEXT_LENGTH, validate_message
 
@@ -63,6 +67,17 @@ def _context():
 
 
 _RAG_CACHE = {}
+
+
+def _allow_costly_request(category: str) -> bool:
+    """Bound repeat requests to cloud-backed endpoints per user/IP process."""
+    try:
+        limit = int(os.environ.get("CLOUD_REQUEST_LIMIT", "60"))
+        window = int(os.environ.get("CLOUD_REQUEST_WINDOW_SECONDS", "60"))
+    except ValueError:
+        limit, window = 60, 60
+    identity = _session_user_id() or request.remote_addr or "anonymous"
+    return request_limiter.allow(f"{category}:{identity}", limit, window)
 
 
 def _sqlite_store():
@@ -231,6 +246,7 @@ def index():
 
 @app.route("/api/health")
 def health():
+    rag_cfg = get_rag_config()
     return jsonify({
         "status": "ok",
         "rule_engine": True,
@@ -239,6 +255,8 @@ def health():
         "search_service": True,
         "huggingface": hf.enabled,
         "llm": ModelManager().status(),
+        "rag": {"backend": rag_cfg["backend"], "pinecone_configured": rag_cfg["pinecone_configured"],
+                "embedding_provider": rag_cfg["embedding_provider"]},
     })
 
 
@@ -345,8 +363,8 @@ def chat():
     # for a document question, say so — do not web-search a private
     # document question. Otherwise fall through to the normal pipeline.
     if profile["logged_in"]:
-        _low = message_or_error.lower()
-        _forced_doc = any(p in _low for p in ("my document", "my file", "uploaded", "in my document", "from my document"))
+        _route = plan_request(message_or_error)
+        _forced_doc = _route["use_rag"]
         try:
             _rule_rag = match_rule(message_or_error)
         except Exception:
@@ -358,11 +376,29 @@ def chat():
             except Exception:
                 _rag = {"evidence_found": False, "error": "RAG unavailable"}
             if _rag.get("evidence_found") and not _rag.get("error"):
+                _response = _rag["answer"]
+                _sources = list(_rag["sources"])
+                _tool = "Pinecone RAG" if _rag["backend"] == "pinecone" else "SQLite fallback RAG"
+                _action = "Answer from your documents"
+                # Combined routing is intentionally explicit: it does not add a
+                # web request unless the user asks to compare/search online.
+                if _route["route"] == "rag_and_web":
+                    _web_results = search_service.search(message_or_error)
+                    if _web_results:
+                        from services.web_answer import format_web_answer
+                        _response += "\n\n--- Current web results (separate from your document evidence) ---\n" + format_web_answer(message_or_error, _web_results)
+                        _sources.extend({"citation": f"W{i}", "source_name": item.get("title", "Web result"),
+                                         "url": item.get("url", ""), "type": "web"}
+                                        for i, item in enumerate(_web_results[:5], 1))
+                        _tool = _tool + " + DuckDuckGo"
+                        _action = "Combine document retrieval with current web results"
                 _payload = {"response": _rag["answer"], "intent": "RAG_ANSWER",
                             "rule_id": "rag_answer", "confidence": 0.85,
                             "confidence_label": "HIGH", "tool": "Pinecone RAG" if _rag["backend"] == "pinecone" else "SQLite fallback RAG",
-                            "action": "Answer from your documents", "sources": _rag["sources"],
+                            "action": _action, "sources": _sources,
                             "backend": _rag["backend"], "processing_ms": round(timer.elapsed_ms(), 1)}
+                _payload["response"] = _response
+                _payload["tool"] = _tool
                 ctx.add_exchange(message_or_error, _payload["response"], "RAG_ANSWER", "rag_answer", 0.85)
                 _save_chat_to_sqlite(message_or_error, _payload)
                 return jsonify(_payload)
@@ -481,19 +517,19 @@ def download(filename):
 
 @app.route("/api/upload", methods=["POST"])
 def upload():
-    """Upload a PDF, DOCX or XLSX for document intelligence."""
+    """Upload a supported document for preview and (when signed in) RAG."""
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded. Use the paperclip button and choose a PDF, DOCX or XLSX file."}), 400
     f = request.files["file"]
     if not f.filename:
         return jsonify({"error": "No file selected."}), 400
     ext = os.path.splitext(f.filename)[1].lower()
-    if ext not in (".pdf", ".docx", ".xlsx"):
-        return jsonify({"error": "Only PDF, DOCX and XLSX files are supported."}), 400
+    if ext not in SUPPORTED_DOCUMENT_EXTENSIONS:
+        return jsonify({"error": "Supported files: PDF, DOCX, XLSX, TXT, Markdown, HTML and CSV."}), 400
     upload_dir = os.path.join(BASE_DIR, "uploads")
     os.makedirs(upload_dir, exist_ok=True)
     safe_name = sanitize_filename(f.filename)
-    path = os.path.join(upload_dir, safe_name)
+    path = safe_join(upload_dir, safe_name)
     f.save(path)
     try:
         text, info = extract_text(path, ext)
@@ -505,9 +541,23 @@ def upload():
     ctx.last_document_text = text
     ctx.last_document_info = info
     preview = summarize_doc(text, max_sentences=3) if text.strip() else "No readable text found."
+    rag_result = None
+    # Preserve anonymous preview-only uploads. Signed-in users receive the
+    # requested end-to-end ingest automatically, using their session identity.
+    if _session_user_id() and text.strip():
+        if not _allow_costly_request("rag-ingest"):
+            return jsonify({"error": "Too many document requests. Please wait a minute and try again."}), 429
+        try:
+            rag_result = _rag_service().ingest_text(_session_user_id(), safe_name, text, source_type=ext)
+        except Exception as exc:
+            logger.warning("Upload parsed but RAG indexing failed: %s", str(exc)[:300])
+            rag_result = {"status": "failed", "error": str(exc)[:300]}
+    message = (f"Uploaded {safe_name}. You can now say 'Summarize my document', "
+               "'Make notes from my document', or ask a question about it.")
+    if rag_result and rag_result.get("status") in ("indexed", "unchanged"):
+        message += " It is also available for document-grounded answers."
     return jsonify({"filename": safe_name, "info": info, "chars": len(text),
-                    "message": f"Uploaded {safe_name}. You can now say 'Summarize my document', 'Make notes from my document', or ask a question about it.",
-                    "summary_preview": preview})
+                    "message": message, "summary_preview": preview, "rag": rag_result})
 
 
 @app.route("/api/documents")
@@ -715,20 +765,24 @@ def rag_ingest():
     user_id = _session_user_id()
     if not user_id:
         return jsonify({"error": "Please sign in first."}), 401
+    if not _allow_costly_request("rag-ingest"):
+        return jsonify({"error": "Too many document requests. Please wait a minute and try again."}), 429
     try:
         if "file" in request.files and request.files["file"].filename:
             f = request.files["file"]
             ext = os.path.splitext(f.filename)[1].lower()
+            if ext not in SUPPORTED_DOCUMENT_EXTENSIONS:
+                return jsonify({"error": "Supported files: PDF, DOCX, XLSX, TXT, Markdown, HTML and CSV."}), 400
             upload_dir = os.path.join(BASE_DIR, "uploads")
             os.makedirs(upload_dir, exist_ok=True)
             safe_name = sanitize_filename(f.filename)
-            path = os.path.join(upload_dir, safe_name)
+            path = safe_join(upload_dir, safe_name)
             f.save(path)
             result = _rag_service().ingest_file(user_id, path, safe_name)
             return jsonify(result)
         data = request.get_json(silent=True) or {}
         text = (data.get("text") or "").strip()
-        source_name = (data.get("source_name") or "pasted-text.txt").strip()
+        source_name = sanitize_filename((data.get("source_name") or "pasted-text.txt").strip())
         if not text:
             return jsonify({"error": "Provide a file or JSON text + source_name."}), 400
         return jsonify(_rag_service().ingest_text(user_id, source_name, text))
@@ -746,18 +800,31 @@ def rag_search():
     if not user_id:
         return jsonify({"error": "Please sign in first."}), 401
     data = request.get_json(silent=True) or {}
-    query = (data.get("q") or data.get("query") or "").strip()
-    if not query:
-        return jsonify({"error": "Provide q."}), 400
+    ok, query = validate_message(data.get("q") or data.get("query"))
+    if not ok:
+        return jsonify({"error": query}), 400
+    if not _allow_costly_request("rag-search"):
+        return jsonify({"error": "Too many search requests. Please wait a minute and try again."}), 429
     try:
         top_k = int(data.get("top_k", 5))
     except Exception:
         top_k = 5
     try:
-        hits = _rag_service().search(user_id, query, top_k=top_k)
+        raw_filters = data.get("filters") if isinstance(data.get("filters"), dict) else {}
+        filters = {key: raw_filters[key] for key in ("document_id", "source_name") if raw_filters.get(key)}
+        hits = _rag_service().search(user_id, query, top_k=top_k, filters=filters)
     except Exception as exc:
         return jsonify({"error": str(exc)[:300], "backend": get_rag_config()["backend"]}), 502
-    return jsonify({"query": query, "results": hits, "backend": get_rag_config()["backend"]})
+    return jsonify({"query": query, "results": hits, "filters": filters,
+                    "backend": get_rag_config()["backend"]})
+
+
+@app.route("/api/rag/metrics")
+def rag_metrics():
+    """Aggregate, process-local retrieval observability (no query/document data)."""
+    if not _session_user_id():
+        return jsonify({"error": "Please sign in first."}), 401
+    return jsonify(retrieval_metrics.snapshot())
 
 
 @app.route("/api/rag/documents")

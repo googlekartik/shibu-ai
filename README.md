@@ -12,6 +12,16 @@ in the header, so the main view stays uncluttered.
 > This is deliberately **not** just an LLM chatbot. The rule engine decides
 > first. Hugging Face is optional and never replaces the rules.
 
+> **Cloud RAG upgrade (2026-10-31):** Signed-in document uploads now support
+> Pinecone-backed RAG with hosted embeddings, source citations, safe document
+> replacement/re-indexing, metadata filters, client-side hybrid scoring and
+> hosted OpenAI/Hugging Face routing. The Render deployment is cloud-only—no
+> local GPU, CUDA, or local model download is required. See
+> [`docs/RAG_AND_OPERATIONS.md`](docs/RAG_AND_OPERATIONS.md) and
+> [`docs/RENDER_DEPLOYMENT.md`](docs/RENDER_DEPLOYMENT.md); cloud LoRA/QLoRA is
+> prepared separately in [`training/README.md`](training/README.md) and has
+> **not** been run because no approved training dataset or budget was supplied.
+
 ## 1. Objectives
 - Build a demonstrable intelligent agent (perception → state → decision → action).
 - Show explainable decisions: intent, matched rule, confidence, tool, time.

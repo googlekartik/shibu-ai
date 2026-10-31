@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import os
 
+from services.retry import retry_cloud_call
+
 
 class PineconeError(Exception):
     pass
@@ -88,7 +90,7 @@ class PineconeVectorStore:
             pass
         return result
 
-    def upsert(self, namespace: str, items: list) -> int:
+    def upsert(self, namespace: str, items: list, attempts: int = 3) -> int:
         """items: dense -> {id, values, metadata}; integrated ->
         {id, text, metadata}. Returns the number of items sent.
         Upsert by stable chunk id is idempotent: re-ingesting the
@@ -96,34 +98,41 @@ class PineconeVectorStore:
         if not items:
             return 0
         index = self._connect()
-        try:
+        def send():
             if self.index_type == "integrated":
                 records = [{"id": it["id"], "text": it["text"],
                             **({"metadata": it["metadata"]} if it.get("metadata") else {})}
                            for it in items]
-                index.upsert_records(records=records, namespace=namespace)
+                return index.upsert_records(records=records, namespace=namespace)
             else:
                 vectors = [{"id": it["id"], "values": it["values"],
                             "metadata": it.get("metadata", {})} for it in items]
-                index.upsert(vectors=vectors, namespace=namespace)
+                return index.upsert(vectors=vectors, namespace=namespace)
+        try:
+            retry_cloud_call(send, attempts=attempts)
         except Exception as exc:
             raise PineconeError(f"Pinecone upsert failed: {exc}"[:300]) from exc
         return len(items)
 
     def query(self, namespace: str, query_text: str = None, vector: list = None,
-              top_k: int = 5, document_id: str = None) -> list:
+              top_k: int = 5, document_id: str = None, metadata_filter: dict = None,
+              attempts: int = 3) -> list:
         """Return [{id, score, text, metadata}]. Dense indexes need
         a vector; integrated indexes need query_text. A filter on
         document_id is applied only when given (per-document search);
         the namespace already isolates the user."""
         index = self._connect()
-        filt = {"document_id": {"$eq": document_id}} if document_id else None
+        filt = dict(metadata_filter or {})
+        if document_id:
+            filt["document_id"] = {"$eq": document_id}
+        filt = filt or None
         try:
             if self.index_type == "integrated":
                 if not query_text:
                     raise PineconeError("Integrated indexes need query text, not a vector.")
-                resp = index.search(namespace=namespace, inputs={"text": query_text},
-                                    top_k=top_k, filter=filt)
+                resp = retry_cloud_call(lambda: index.search(
+                    namespace=namespace, inputs={"text": query_text}, top_k=top_k, filter=filt),
+                    attempts=attempts)
                 hits = []
                 # SDK shapes differ by version: result.hits, or dict result.
                 raw_hits = []
@@ -148,8 +157,9 @@ class PineconeVectorStore:
                 return hits
             if vector is None:
                 raise PineconeError("Dense indexes need a query vector; no embedding provider is configured.")
-            resp = index.query(vector=vector, top_k=top_k, namespace=namespace,
-                               include_metadata=True, filter=filt)
+            resp = retry_cloud_call(lambda: index.query(
+                vector=vector, top_k=top_k, namespace=namespace,
+                include_metadata=True, filter=filt), attempts=attempts)
             matches = resp.matches if hasattr(resp, "matches") else resp.get("matches", [])
             out = []
             for m in matches:
@@ -167,11 +177,45 @@ class PineconeVectorStore:
         except Exception as exc:
             raise PineconeError(f"Pinecone query failed: {exc}"[:300]) from exc
 
-    def delete_by_document(self, namespace: str, document_id: str) -> None:
+    def delete_by_document(self, namespace: str, document_id: str, attempts: int = 3) -> None:
         """Delete every vector for one document, in that user's
         namespace only. Never delete_all, never another namespace."""
         index = self._connect()
         try:
-            index.delete(filter={"document_id": {"$eq": document_id}}, namespace=namespace)
+            retry_cloud_call(lambda: index.delete(
+                filter={"document_id": {"$eq": document_id}}, namespace=namespace), attempts=attempts)
         except Exception as exc:
             raise PineconeError(f"Pinecone delete failed: {exc}"[:300]) from exc
+
+    def rerank(self, query: str, documents: list, model: str, top_n: int,
+               attempts: int = 3) -> list:
+        """Optional Pinecone-hosted reranking.
+
+        It is only called when explicitly enabled in configuration.  The SDK
+        response has changed shape between releases, so both mapping and
+        object responses are accepted.  A failure is intentionally surfaced
+        to the caller, which can retain the already-good vector ranking.
+        """
+        if not model:
+            return []
+        self._connect()
+        payload = [{"id": str(i), "text": item.get("text", "")} for i, item in enumerate(documents)]
+        try:
+            response = retry_cloud_call(lambda: self._client.inference.rerank(
+                model=model, query=query, documents=payload, rank_fields=["text"],
+                top_n=min(max(1, top_n), len(payload)), return_documents=False), attempts=attempts)
+            raw = getattr(response, "data", None)
+            if raw is None and isinstance(response, dict):
+                raw = response.get("data") or response.get("results") or []
+            ordered = []
+            for item in raw or []:
+                if isinstance(item, dict):
+                    idx, score = item.get("index"), item.get("score")
+                else:
+                    idx, score = getattr(item, "index", None), getattr(item, "score", None)
+                if idx is None:
+                    continue
+                ordered.append({"index": int(idx), "score": float(score or 0.0)})
+            return ordered
+        except Exception as exc:
+            raise PineconeError(f"Pinecone rerank failed: {exc}"[:300]) from exc

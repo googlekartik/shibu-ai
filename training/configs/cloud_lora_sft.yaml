@@ -1,0 +1,40 @@
+# Template only — it cannot start a job and contains no credentials.
+# Map these values to the approved managed trainer (TRL/PEFT-compatible).
+run_mode: pilot
+base_model: Qwen/Qwen2.5-1.5B-Instruct
+dataset:
+  approved_source: REQUIRED_OWNER_APPROVAL
+  revision: REQUIRED_OWNER_APPROVAL
+  format: jsonl_messages
+  train_split: train
+  validation_split: validation
+security:
+  allow_private_user_content: false
+  require_license_review: true
+  remove_duplicates: true
+  redact_sensitive_patterns: true
+training:
+  trainer: sft
+  max_seq_length: 2048
+  epochs: 1
+  learning_rate: 0.0002
+  per_device_train_batch_size: auto
+  gradient_accumulation_steps: auto
+  mixed_precision: bf16_or_fp16_by_host
+  quantization: int4_if_supported
+  peft:
+    method: lora
+    r: 16
+    alpha: 32
+    dropout: 0.05
+    target_modules: all-linear
+evaluation:
+  require_held_out_split: true
+  compare_base_model: true
+  require_human_review: true
+artifacts:
+  checkpoint_destination: managed_persistent_artifact_store
+  save_adapter_only: true
+promotion:
+  automatic: false
+  rollback_model_env: HF_MODEL

@@ -41,6 +41,29 @@ KNOWN_DIMENSIONS = {
 }
 
 
+def _bounded_int(name: str, default: int, lower: int, upper: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(lower, min(value, upper))
+
+
+def _bounded_float(name: str, default: float, lower: float, upper: float) -> float:
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(lower, min(value, upper))
+
+
+def _enabled(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
 def namespace_for_user(user_id: str) -> str:
     """google#123 -> user-123. Any other id is sanitised to
     letters/digits/dash only, so it is always a valid namespace."""
@@ -70,22 +93,12 @@ def get_rag_config() -> dict:
         backend = "auto"
     if backend == "auto":
         backend = "pinecone" if (api_key_present and index_name) else "sqlite"
-    try:
-        top_k = int(os.environ.get("RAG_TOP_K", "5"))
-    except ValueError:
-        top_k = 5
-    try:
-        min_score = float(os.environ.get("RAG_MIN_SCORE", "0.30"))
-    except ValueError:
-        min_score = 0.30
-    try:
-        chunk_size = int(os.environ.get("RAG_CHUNK_SIZE", "800"))
-    except ValueError:
-        chunk_size = 800
-    try:
-        chunk_overlap = int(os.environ.get("RAG_CHUNK_OVERLAP", "100"))
-    except ValueError:
-        chunk_overlap = 100
+    top_k = _bounded_int("RAG_TOP_K", 5, 1, 20)
+    min_score = _bounded_float("RAG_MIN_SCORE", 0.30, -1.0, 1.0)
+    chunk_size = _bounded_int("RAG_CHUNK_SIZE", 800, 200, 4000)
+    chunk_overlap = _bounded_int("RAG_CHUNK_OVERLAP", 100, 0, chunk_size // 2)
+    embedding_version = (os.environ.get("EMBEDDING_VERSION", "").strip()
+                         or f"{provider}:{model}")
     return {
         "pinecone_configured": bool(api_key_present and index_name),
         "pinecone_api_key_present": api_key_present,
@@ -95,10 +108,20 @@ def get_rag_config() -> dict:
         "embedding_model": model,
         "embedding_dimension": embedding_dimension_for_model(model),
         "backend": backend,
-        "top_k": max(1, min(top_k, 20)),
+        "top_k": top_k,
         "min_score": min_score,
-        "chunk_size": max(200, chunk_size),
-        "chunk_overlap": max(0, min(chunk_overlap, chunk_size // 2)),
+        "chunk_size": chunk_size,
+        "chunk_overlap": chunk_overlap,
+        "embedding_version": embedding_version[:160],
+        "embedding_batch_size": _bounded_int("EMBEDDING_BATCH_SIZE", 64, 1, 256),
+        "upsert_batch_size": _bounded_int("PINECONE_UPSERT_BATCH_SIZE", 80, 1, 100),
+        "query_cache_ttl_seconds": _bounded_int("RAG_QUERY_CACHE_TTL_SECONDS", 120, 0, 3600),
+        "max_context_chars": _bounded_int("RAG_MAX_CONTEXT_CHARS", 9000, 1000, 24000),
+        "metadata_text_chars": _bounded_int("RAG_METADATA_TEXT_CHARS", 1600, 200, 8000),
+        "hybrid_enabled": _enabled("RAG_HYBRID_ENABLED", True),
+        "rerank_enabled": _enabled("RAG_RERANK_ENABLED", False),
+        "rerank_model": os.environ.get("PINECONE_RERANK_MODEL", "").strip(),
+        "cloud_retries": _bounded_int("CLOUD_RETRY_ATTEMPTS", 3, 1, 5),
         "sqlite_path": os.environ.get("SHIBU_SQLITE_PATH", "") or None,
     }
 
