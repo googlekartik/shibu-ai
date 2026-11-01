@@ -243,7 +243,10 @@ def _web_fallback_answer(text: str, context, processing_ms=0.0):
         text=format_web_answer(topic, results),
         intent="WEB_SEARCH", rule_id="web_fallback", confidence=0.85,
         tool="DuckDuckGo search + text processing", action="Answer unknown topic from web",
-        extra={"search_results": results, "search_query": topic},
+        extra={"search_results": results, "search_query": topic,
+               "sources": [{"citation": f"W{i}", "source_name": r.get("title", "Web result"),
+                            "url": r.get("url", ""), "type": "web"}
+                           for i, r in enumerate(results[:5], 1)]},
         processing_ms=processing_ms)
     context.add_exchange(text, payload["response"], "WEB_SEARCH", "web_fallback", 0.85)
     return payload
@@ -416,7 +419,10 @@ def process_single_message(message: str, context, processing_ms=0.0):
                 text=_phrase_search_results(query, results),
                 intent="WEB_SEARCH", rule_id="web_search", confidence=0.90,
                 tool="DuckDuckGo search", action="Search the web",
-                extra={"search_results": results, "search_query": query},
+                extra={"search_results": results, "search_query": query,
+                       "sources": [{"citation": f"W{i}", "source_name": r.get("title", "Web result"),
+                                    "url": r.get("url", ""), "type": "web"}
+                                   for i, r in enumerate(results[:5], 1)]},
                 processing_ms=processing_ms)
         else:
             payload = format_response(
@@ -710,6 +716,22 @@ def process_single_message(message: str, context, processing_ms=0.0):
                 return payload
         # Analyzer failure must not hide the normal answer: fall
         # through to the rule engine / web fallback below.
+
+    # 5m) Daily tasks (Design B, LLM-first): plans, writing and
+    # how-tos skip the rule engine, so a generic keyword rule can
+    # never answer them with the wrong topic. Maths, search,
+    # documents and files above keep priority. If the model is
+    # unavailable for a how-to, fall through to the web fallback
+    # below instead of giving up.
+    from services.daily_task_service import build_daily_task_payload, unavailable_howto_payload
+    daily_payload, _needs_web = build_daily_task_payload(text, context, processing_ms)
+    if daily_payload is not None:
+        return daily_payload
+    if _needs_web:
+        web_payload = _web_fallback_answer(text, context, processing_ms)
+        if web_payload is not None:
+            return web_payload
+        return unavailable_howto_payload(text, context, processing_ms)
 
     # 6) Rule engine, with the LLM as a labelled fallback for UNKNOWN or
     # low-confidence answers only. High-confidence rule answers, maths,

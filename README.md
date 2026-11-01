@@ -453,3 +453,40 @@ leaves the original plain payload untouched.
   the local GPU-training package). Live Flask: / 200, /api/health 200, ML explain and
   compare answers carry presentation blocks, maths returns no presentation, running total
   49933 -> 1017397 still works.
+
+## 29. Daily tasks, Design B — LLM-first plans, writing and how-tos (2026-11-01, local only — NOT pushed to GitHub)
+
+Chosen by Kartik after the live test of commit 2290e90c found three daily-task failures
+(tea steps answered with a greeting rule, a day plan answered with study tips, an email
+draft fell back to "I'm not sure"). Design B: daily tasks go to the language model first,
+with a task-specific prompt; the rule engine is skipped for them.
+
+- **Daily-task service** (`services/daily_task_service.py`): detects `plan`, `write` and
+  `howto` requests (with exclusions so greetings, maths and file requests keep their
+  existing priority), builds a system prompt per kind (timetable from only the
+  activities/times given, ready-to-send email/letter with [Name]/[Date] placeholders
+  for missing details, numbered how-to steps), and calls `ModelManager.generate`.
+  No model / generation failure: plans and emails get a labelled template built only
+  from the request; how-tos try the existing web fallback, and if the web also
+  returns nothing, an honest "could not look up steps" payload — so a how-to can
+  never again fall through to an unrelated greeting rule. Defaults chosen where
+  Kartik did not answer: only the current message is used (no remembered routine),
+  and emails use blanks instead of asking first.
+- **Router step 5m** (`chatbot/router.py`, before the rule engine, after maths/search/
+  documents/files): daily-task payloads return directly; how-to web fallback and
+  the unavailable payload are handled there.
+- **Live-test fixes in the same batch**: quiz questions now require at least two
+  options, with distractors drawn from other retrieved phrases (never invented);
+  web-search payloads now carry a `sources` array with clickable URLs (the
+  frontend only renders `sources`, not `search_results`; cached answers are
+  normalised the same way in `app.py`); the Chats sidebar re-renders after each
+  reply when visible, and Clear / New chat hide the Details panel; the
+  structuring engine no longer repeats the definition sentence in the intro,
+  callout, key points and takeaway.
+- **Tests**: 132 pytest passed (122 previous + 10 new in
+  tests/test_daily_tasks_2026.py). Live Flask (no model keys in this workspace):
+  plan and email return labelled templates, tea returns a web answer with steps
+  (DuckDuckGo worked on retry) or the honest unavailable payload when the web
+  also fails (unit-tested), maths 49933 still works, "How are you?" still
+  greets. A real model-drafted plan/email/howto on the live site still needs
+  confirming after a merge + Render redeploy.

@@ -36,24 +36,28 @@ def build_quiz(analysis: dict, intent: dict) -> dict | None:
     facts = [f["text"] for f in analysis.get("facts", [])]
     questions = []
     for term, meaning in pairs[:2]:
-        distractors = [m for _t, m in pairs if m != meaning][:3]
-        if len(distractors) < 2 and len(facts) < 3:
-            continue
+        # Distractors are other retrieved phrases, never invented:
+        # other definitions' meanings, then the opening words of
+        # other retrieved facts. A question with fewer than two
+        # options is not a quiz and is not shown at all.
+        distractors = []
+        for _t, m in pairs:
+            if m != meaning and m not in distractors:
+                distractors.append(m)
+        for fact in facts:
+            candidate = " ".join(fact.split()[:10]).strip(" .")
+            if candidate and candidate not in distractors and candidate != meaning:
+                distractors.append(candidate)
+            if len(distractors) >= 3:
+                break
         options = _deterministic_order([meaning] + distractors[:3], term)[:4]
+        if len(options) < 2:
+            continue
         questions.append({
             "question": f"What is {term}?",
             "options": options,
             "answer_index": options.index(meaning),
             "explanation": f"{term} is {meaning}.",
-        })
-    if not questions and facts:
-        # Fallback: one comprehension question naming the topic,
-        # answered by the first fact, with no invented options.
-        questions.append({
-            "question": "Which statement is supported by the retrieved text?",
-            "options": [facts[0][:160]],
-            "answer_index": 0,
-            "explanation": facts[0][:160],
         })
     if not questions:
         return None

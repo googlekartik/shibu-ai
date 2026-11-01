@@ -26,6 +26,7 @@ from services.document_service import (extract_text, summarize as summarize_doc,
 from services.file_generation_service import generate_pptx, generate_docx, generate_xlsx
 from services.cache_service import (cached_answer_lookup, cached_answer_store,
                                     looks_personal, normalize_query)
+from services.citation_manager import normalize_sources
 from services.rag_config import get_rag_config
 from services.rag_service import RAGService
 from services.request_router import plan_request
@@ -448,7 +449,7 @@ def chat():
                     "response": hit["summary"], "intent": "WEB_SEARCH",
                     "rule_id": "cached_web_answer", "confidence": 0.85,
                     "confidence_label": "HIGH", "tool": "Cached web answer",
-                    "action": "Answer from cache", "sources": hit.get("sources", []),
+                    "action": "Answer from cache", "sources": normalize_sources(hit.get("sources", [])),
                     "cached": True, "processing_ms": round(timer.elapsed_ms(), 1),
                 }
                 _attach_presentation(message_or_error, payload, ctx)

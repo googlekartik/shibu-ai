@@ -99,6 +99,12 @@ def _pros_cons(analysis: dict, text: str) -> dict | None:
     return {"kind": "pros_cons", "pros": pros[:4], "cons": cons[:4]}
 
 
+def _norm_key(text: str) -> str:
+    """First 50 alphanumeric characters: enough to spot the same
+    sentence repeated in the intro, a callout and the key points."""
+    return re.sub(r"[^a-z0-9]", "", (text or "").lower())[:50]
+
+
 def structure(response_text: str, analysis: dict, intent: dict, sources: list = None) -> list:
     """Build blocks for one answer. ``response_text`` is the answer
     the existing pipeline already produced; structuring re-presents
@@ -113,13 +119,16 @@ def structure(response_text: str, analysis: dict, intent: dict, sources: list = 
     sections = split_sections(text)
     first_section = sections[0] if sections else {"heading": "", "body": clean_passage(text), "lines": []}
     intro_text = first_section["body"]
+    used = {_norm_key(s) for s in _sentences_from(intro_text)}
     if topic:
         blocks.append({"kind": "heading", "level": 2, "text": topic[:80].capitalize() if topic else ""})
     if intro_text:
         blocks.append({"kind": "paragraph", "text": intro_text[:1200]})
     if analysis.get("definitions"):
-        blocks.append({"kind": "callout", "title": "Definition",
-                       "text": analysis["definitions"][0]["text"]})
+        definition = analysis["definitions"][0]["text"]
+        if _norm_key(definition) not in used:
+            blocks.append({"kind": "callout", "title": "Definition", "text": definition})
+            used.add(_norm_key(definition))
 
     if content_type == "compare":
         table = _compare_table(analysis, intent.get("entities", []))
@@ -152,10 +161,13 @@ def structure(response_text: str, analysis: dict, intent: dict, sources: list = 
                            "headers": ["Figure", "Source"],
                            "rows": [[s["text"][:160], s.get("source_name", "Source")] for s in stats[:6]]})
     else:
-        # Explain / web research / default: key points + examples.
-        key_points = [f["text"] for f in analysis.get("key_points", [])]
+        # Explain / web research / default: key points + examples,
+        # skipping sentences already shown in the intro/definition.
+        key_points = [f["text"] for f in analysis.get("key_points", [])
+                      if _norm_key(f["text"]) not in used]
         if key_points:
             blocks.append({"kind": "list", "title": "Key points", "items": key_points[:6]})
+            used.update(_norm_key(p) for p in key_points)
         if analysis.get("examples"):
             blocks.append({"kind": "list", "title": "Examples",
                            "items": [e["text"] for e in analysis["examples"][:4]]})
@@ -173,8 +185,11 @@ def structure(response_text: str, analysis: dict, intent: dict, sources: list = 
         blocks.append({"kind": "callout", "title": "Uncertain in the sources",
                        "text": analysis["uncertainties"][0][:300]})
     conclusions = analysis.get("conclusions", [])
-    if conclusions:
-        blocks.append({"kind": "paragraph", "text": conclusions[0]["text"]})
-    elif analysis.get("key_points"):
-        blocks.append({"kind": "paragraph", "text": "Key takeaway: " + analysis["key_points"][0]["text"]})
+    takeaway = None
+    for candidate in [c["text"] for c in conclusions] + [f["text"] for f in analysis.get("key_points", [])]:
+        if _norm_key(candidate) not in used:
+            takeaway = candidate
+            break
+    if takeaway:
+        blocks.append({"kind": "paragraph", "text": "Key takeaway: " + takeaway})
     return blocks

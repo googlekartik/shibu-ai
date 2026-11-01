@@ -322,6 +322,7 @@ async function sendMessage(text) {
     if (!res.ok) { addMessage("Error: " + (data.error || "Something went wrong."), "bot"); return; }
     addMessage(data.response, "bot", data);
     updateExplainability(data);
+    if (sidebarEl && !sidebarEl.classList.contains("hidden")) renderHistory();
   } catch (e) {
     typingEl.classList.add("hidden");
     addMessage("Could not reach the server. Is Flask running on http://127.0.0.1:5000 ?", "bot");
@@ -414,6 +415,7 @@ document.getElementById("sidebarBtn").onclick = () => {
 document.getElementById("newChatBtn").onclick = async () => {
   await fetch("/api/clear", { method: "POST" });
   messagesEl.innerHTML = "";
+  detailsEl.classList.add("hidden");
   await showWelcomeIfNeeded();
   if (!messagesEl.children.length) addMessage("Hello! I'm Shibu AI. How can I help you today?", "bot");
 };
@@ -421,6 +423,7 @@ document.getElementById("clearBtn").onclick = async () => {
   await fetch("/api/clear", { method: "POST" });
   try { localStorage.removeItem("rb_chat_history"); } catch (e) {}
   messagesEl.innerHTML = "";
+  detailsEl.classList.add("hidden");
   renderHistory();
   addMessage("Hello! I'm Shibu AI. How can I help you today?", "bot");
 };
