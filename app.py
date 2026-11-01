@@ -137,6 +137,40 @@ def _save_chat_to_sqlite(user_message, payload):
             logger.exception("SQLite memory save failed (chat still returned)")
 
 
+def _document_summary_fallback(user_id: str, message: str):
+    """Summary from the user's stored document text when RAG search
+    found nothing (for example, indexing is unavailable). Only the
+    stored text is used — nothing is invented — and the document
+    name is cited. Returns a payload dict, or None when the
+    message is not a summary request or no stored text exists."""
+    if not re.search(r"\bsummar", (message or "").lower()):
+        return None
+    try:
+        store = _sqlite_store()
+        docs = store.list_documents(user_id)
+    except Exception:
+        return None
+    for doc in docs:
+        try:
+            full = store.get_document_with_text(user_id, doc["document_id"])
+        except Exception:
+            continue
+        text = ((full or {}).get("full_text") or "").strip()
+        if not text:
+            continue
+        from services.document_service import summarize as summarize_doc
+        summary = summarize_doc(text, max_sentences=5)
+        source_name = doc.get("source_name") or "document"
+        return {"response": f"Summary of {source_name}:\n\n{summary}",
+                "intent": "DOCUMENT_SUMMARY", "rule_id": "document_summary_fallback",
+                "confidence": 0.85, "confidence_label": "HIGH",
+                "tool": "Documents", "action": "Summarise stored document",
+                "sources": [{"citation": "S1", "source_name": source_name,
+                             "document_id": doc["document_id"], "chunk_index": None}],
+                "backend": "sqlite_fallback"}
+    return None
+
+
 def _attach_presentation(message, payload, ctx):
     """Add structured presentation blocks to a finished payload.
 
@@ -194,7 +228,7 @@ def _refuse_chat_in_dev_panel_mode():
     routing accident; an explicit JSON 403 says chat is disabled
     on this service, in the same style as the POST refusal."""
     if _dev_panel_enabled() and request.path == "/api/chat":
-        return jsonify({"error": "Developer panel mode: chat is disabled on this service."}), 403
+        return jsonify({"error": "Developer panel mode: chat is disabled on this service — this request is not authorized."}), 403
 
 
 def _dev_owner_configured():
@@ -327,6 +361,28 @@ def _profile():
             profile["onboarding_completed"] = True
             profile["onboarding_stage"] = None
     except Exception:
+        user = None
+    # Sync-back (best effort): the session is authoritative for a
+    # profile completed before the SQLite row was recreated (a
+    # redeploy can wipe the ephemeral store). Persisting the
+    # session's avatar/completed flags here means a later session
+    # that lost its cookie still skips onboarding. /api/clear
+    # never touches these flags, so a new chat keeps the profile.
+    try:
+        if user is not None:
+            sync_avatar = _canonical_avatar_id(session.get("profile_avatar_id"))
+            sync_completed = bool(session.get("onboarding_completed"))
+            if (sync_completed and not user.get("onboarding_completed")) or \
+                    (sync_avatar and not _canonical_avatar_id(user.get("avatar_id"))):
+                _sqlite_store().update_user(
+                    user_id, avatar_id=sync_avatar,
+                    onboarding_completed=True if sync_completed else None)
+                if sync_completed:
+                    profile["onboarding_completed"] = True
+                    profile["onboarding_stage"] = None
+                if sync_avatar:
+                    profile["avatar_id"] = sync_avatar
+    except Exception:
         pass
     profile["avatar_id"] = _canonical_avatar_id(profile["avatar_id"])
     if not profile["onboarding_completed"] and not profile["onboarding_stage"]:
@@ -441,7 +497,7 @@ def chat():
     if not ok:
         return jsonify({"error": message_or_error}), 400
     if _dev_panel_enabled():
-        return jsonify({"error": "Developer panel mode: chat is disabled on this service."}), 403
+        return jsonify({"error": "Developer panel mode: chat is disabled on this service — this request is not authorized."}), 403
     ctx = _context()
     # Developer-panel setting: web search can be switched off from
     # the panel. Default True; any settings failure keeps search on.
@@ -560,7 +616,39 @@ def chat():
                 _record_query_event(message_or_error, _payload, timer.elapsed_ms())
                 return jsonify(_payload)
             if _forced_doc and not _rag.get("evidence_found"):
+                # A summary request can still be answered from the
+                # stored document text when search/indexing failed:
+                # the text is already saved, so summarising it does
+                # not depend on the vector index.
+                _summary = _document_summary_fallback(_session_user_id(), message_or_error)
+                if _summary is not None:
+                    _summary["processing_ms"] = round(timer.elapsed_ms(), 1)
+                    _attach_presentation(message_or_error, _summary, ctx)
+                    ctx.add_exchange(message_or_error, _summary["response"],
+                                     "DOCUMENT_SUMMARY", "document_summary_fallback", 0.85)
+                    _save_chat_to_sqlite(message_or_error, _summary)
+                    _record_query_event(message_or_error, _summary, timer.elapsed_ms())
+                    return jsonify(_summary)
+                if _rag.get("error"):
+                    # Search itself failed: do not claim the user has
+                    # no documents, and do not claim the documents
+                    # lack the answer — neither was established.
+                    _unavailable = ("I could not search your documents just now. "
+                                    "Please try again in a moment — your uploaded documents are still saved.")
+                    _payload = {"response": _unavailable,
+                                "intent": "RAG_NO_EVIDENCE", "rule_id": "rag_no_evidence", "confidence": 0.90,
+                                "confidence_label": "HIGH", "tool": "Pinecone RAG" if _rag.get("backend") == "pinecone" else "SQLite fallback RAG",
+                                "action": "Document search unavailable", "sources": [],
+                                "backend": _rag.get("backend"), "processing_ms": round(timer.elapsed_ms(), 1)}
+                    ctx.add_exchange(message_or_error, _payload["response"], "RAG_NO_EVIDENCE", "rag_no_evidence", 0.90)
+                    _save_chat_to_sqlite(message_or_error, _payload)
+                    _record_query_event(message_or_error, _payload, timer.elapsed_ms())
+                    return jsonify(_payload)
                 try:
+                    # The user's own documents, whatever the current
+                    # chat/session: a new chat never means "no
+                    # documents". Failed-index rows still count as
+                    # uploaded documents.
                     _has_docs = bool(_sqlite_store().list_documents(_session_user_id()))
                 except Exception:
                     _has_docs = False
@@ -724,8 +812,12 @@ def upload():
         try:
             rag_result = _rag_service().ingest_text(_session_user_id(), safe_name, text, source_type=ext)
         except Exception as exc:
+            # Raw provider/API detail stays in the server log only.
+            # The response carries a fixed neutral status: the
+            # frontend must never render a raw error into chat.
             logger.warning("Upload parsed but RAG indexing failed: %s", str(exc)[:300])
-            rag_result = {"status": "failed", "error": str(exc)[:300]}
+            rag_result = {"status": "failed",
+                          "error": "Document search indexing is unavailable right now."}
     message = (f"Uploaded {safe_name}. You can now say 'Summarize my document', "
                "'Make notes from my document', or ask a question about it.")
     if rag_result and rag_result.get("status") in ("indexed", "unchanged"):

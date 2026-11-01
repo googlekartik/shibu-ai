@@ -101,7 +101,10 @@ def test_d3_meta_unparseable_response_is_a_clean_error_without_payload(monkeypat
     svc = MetaService(api_key="k", model="m")
     text, err = svc.generate([{"role": "user", "content": "hi"}])
     assert text is None
-    assert err == "The Meta-compatible API returned a response in an unexpected format."
+    # Round 3: safe diagnostics only — HTTP status + top-level keys,
+    # never payload values.
+    assert err.startswith("The Meta-compatible API returned a response in an unexpected format")
+    assert "HTTP 200" in err and "response keys: choices" in err
     assert "secret" not in err and "xyz" not in err
 
 
@@ -166,7 +169,12 @@ def test_d3_fallback_template_never_discloses_provider_error(monkeypatch):
     assert payload is not None
     assert "Meta" not in payload["response"]
     assert "unexpected format" not in payload["response"]
-    assert "basic template" in payload["response"]
+    # Round 3: the template is delivered cleanly — no mention of
+    # the language model, no failure disclosure at all.
+    for forbidden in ("basic template", "could not draft", "not available",
+                      "language model", "Pinecone", "400", "/api/", "X-Pinecone"):
+        assert forbidden not in payload["response"]
+    assert "Your day plan:" in payload["response"]
 
 
 # ---------------------------------------------------------------- D4

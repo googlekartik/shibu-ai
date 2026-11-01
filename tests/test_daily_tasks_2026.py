@@ -84,8 +84,12 @@ def test_router_template_fallback_when_llm_off(monkeypatch):
 
     monkeypatch.setattr(daily, "ModelManager", lambda: OffManager())
     out = process_message("Plan my day: I work 9 to 5, want gym and 1 hour of study", ConversationContext())
-    assert out["rule_id"] == "daily_plan" and "template" in out["response"].lower()
+    # Round 3: the template is delivered cleanly — no mention of
+    # the language model or its failure, just the plan itself.
+    assert out["rule_id"] == "daily_plan" and "Your day plan:" in out["response"]
     assert "gym" in out["response"].lower()
+    for forbidden in ("language model", "not available", "could not draft", "basic template"):
+        assert forbidden not in out["response"]
     out = process_message("Write a polite email to my teacher asking for leave tomorrow", ConversationContext())
     assert out["rule_id"] == "daily_write" and "Subject:" in out["response"]
 

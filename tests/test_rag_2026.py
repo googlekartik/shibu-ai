@@ -68,34 +68,80 @@ def test_dimension_mismatch_is_migration_not_silent_fix():
     assert ok2 is True
 
 
-def test_pinecone_api_selection_by_index_type():
-    """Fake index objects prove dense uses upsert/query and
-    integrated uses upsert_records/search, without network."""
+def test_pinecone_api_selection_by_index_type(monkeypatch):
+    """Fake transport proves dense uses the SDK vectors API while
+    integrated (document-schema) indexes use the Documents REST
+    API with the X-Pinecone-Api-Version header, without network."""
     calls = []
 
     class FakeIndex:
         def upsert(self, vectors, namespace):
             calls.append(("upsert", namespace, len(vectors)))
-        def upsert_records(self, records, namespace):
-            calls.append(("upsert_records", namespace, len(records)))
+
         def query(self, vector, top_k, namespace, include_metadata, filter=None):
             calls.append(("query", namespace))
             return {"matches": []}
-        def search(self, namespace, inputs, top_k, filter=None):
-            calls.append(("search", namespace))
-            return {"result": {"hits": []}}
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+            self.status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(("documents", url, headers.get("X-Pinecone-Api-Version"),
+                      json))
+        if url.endswith("/documents/upsert"):
+            return FakeResponse({"upserted_count": 1})
+        if url.endswith("/documents/search"):
+            return FakeResponse({"result": {"hits": [
+                {"_id": "b", "_score": 0.9,
+                 "fields": {"text": "hello world",
+                            "document_id": "doc-1", "chunk_index": 0}}]}})
+        if url.endswith("/documents/delete"):
+            return FakeResponse({})
+        raise AssertionError(url)
+
+    import requests
+    monkeypatch.setattr(requests, "post", fake_post)
 
     dense = PineconeVectorStore(api_key="x", index_name="x", index_type="dense")
     dense._index = FakeIndex()
     dense.upsert("user-1", [{"id": "a", "values": [0.1, 0.2], "metadata": {}}])
     dense.query("user-1", vector=[0.1, 0.2], top_k=3)
     assert ("upsert", "user-1", 1) in calls and ("query", "user-1") in calls
+    assert not [c for c in calls if c[0] == "documents"]
 
     integ = PineconeVectorStore(api_key="x", index_name="x", index_type="integrated")
     integ._index = FakeIndex()
-    integ.upsert("user-1", [{"id": "b", "text": "hello world"}])
-    integ.query("user-1", query_text="hello", top_k=3)
-    assert ("upsert_records", "user-1", 1) in calls and ("search", "user-1") in calls
+    integ._index.describe_index_stats = lambda: {"namespaces": {}}
+    integ._host = "doc-host.pinecone.io"
+    integ.upsert("user-1", [{"id": "b", "text": "hello world",
+                             "metadata": {"document_id": "doc-1", "chunk_index": 0}}])
+    hits = integ.query("user-1", query_text="hello", top_k=3)
+    integ.delete_by_document("user-1", "doc-1")
+
+    docs_calls = [c for c in calls if c[0] == "documents"]
+    assert len(docs_calls) == 3
+    for _kind, url, version, _body in docs_calls:
+        assert version == "2026-07"
+        assert url.startswith("https://doc-host.pinecone.io/namespaces/user-1/documents/")
+    upsert_body = docs_calls[0][3]
+    assert upsert_body["documents"][0]["_id"] == "b"
+    assert upsert_body["documents"][0]["text"] == "hello world"
+    assert upsert_body["documents"][0]["document_id"] == "doc-1"
+    assert upsert_body["documents"][0]["chunk_index"] == 0
+    search_body = docs_calls[1][3]
+    assert search_body["top_k"] == 3
+    assert search_body["score_by"][0]["query"] == "hello"
+    delete_body = docs_calls[2][3]
+    assert delete_body["filter"]["document_id"]["$eq"] == "doc-1"
+    assert hits and hits[0]["id"] == "b" and hits[0]["text"] == "hello world"
 
 
 def test_rag_status_reports_live_pinecone_blocked_not_success():

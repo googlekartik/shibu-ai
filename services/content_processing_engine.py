@@ -75,7 +75,16 @@ def process_presentation(message: str, payload: dict, context=None) -> dict | No
     # ("What is Here?") with no real question behind them.
     _is_template_daily = str(payload.get("rule_id", "")).startswith("daily_") and \
         "Template" in str(payload.get("tool", ""))
-    quiz = None if _is_template_daily else build_quiz(analysis, intent)
+    # An answer that already IS a quiz (a comparison quiz, or any
+    # quiz payload) must not gain a second quiz block derived
+    # from the same text: the derived block repeats the answer's
+    # own options as garbled fragments ("Quick check / What is
+    # Here?") and shows as a duplicate quiz.
+    _already_quiz = rule_intent == "QUIZ" or \
+        str(payload.get("rule_id", "")).endswith("_quiz") or \
+        response.strip().startswith("Quiz on the comparison:") or \
+        "\nQuiz on the comparison:" in response
+    quiz = None if (_is_template_daily or _already_quiz) else build_quiz(analysis, intent)
     if quiz:
         blocks.append(quiz)
     flashcards = build_flashcards(analysis, intent)

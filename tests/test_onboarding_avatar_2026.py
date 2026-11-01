@@ -10,10 +10,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import app as app_module
 
 
-def _client_with_login():
+def _client_with_login(user="google#test-onboarding"):
     client = app_module.app.test_client()
     with client.session_transaction() as sess:
-        sess["google_user_id"] = "google#test-onboarding"
+        sess["google_user_id"] = user
         sess["google_display_name"] = "Test User"
     return client
 
@@ -53,7 +53,10 @@ def test_avatar_validation_and_save():
 
 
 def test_welcome_flow_ask_name_then_goal_then_normal_chat():
-    client = _client_with_login()
+    # A first-time user: a distinct id, because onboarding
+    # completion is durable per user (a completed profile in the
+    # SQLite row skips the welcome even in a fresh session).
+    client = _client_with_login("google#test-onboarding-welcome")
     client.post("/api/profile/avatar", json={"avatar_id": "avatar-1"})
     status = client.get("/api/onboarding/status").get_json()
     assert status["needs_welcome"] is True

@@ -50,10 +50,15 @@ def _fmt(value):
 # Conservative plain-word replacements for "explain it more simply".
 # Only long or formal wording is swapped; a sentence with none of
 # these keeps its wording, so a simplified answer never invents
-# facts — it only rewords the previous answer.
+# facts — it only rewords the previous answer. "Releasing X as a
+# by-product" is not swapped in place: it becomes its own short
+# second sentence ("It gives off X."), which is what makes the
+# simplified answer genuinely plainer instead of one long sentence
+# with two words changed.
 _SIMPLIFY = (
     ("in the presence of", "with"),
-    ("process by which", "way"),
+    ("is the process by which", "is how"),
+    ("the process by which", "how"),
     ("converts", "changes"),
     ("convert", "change"),
     ("produces", "makes"),
@@ -61,24 +66,42 @@ _SIMPLIFY = (
     ("utilise", "use"),
     ("utilize", "use"),
     ("requires", "needs"),
+    ("using sunlight", "with sunlight"),
     ("using", "with"),
     ("releasing", "giving off"),
 )
 
 
 def simplify_sentence(sentence: str) -> str:
-    """Reword one sentence in plainer words: drop equations and
-    parenthetical asides, swap formal wording for short words.
-    Returns the reworded sentence (possibly unchanged)."""
+    """Reword one sentence in plainer words, as up to two short
+    sentences: equations and parenthetical asides are dropped,
+    formal wording is swapped for short words, and a trailing
+    "releasing X as a by-product" clause becomes a second
+    sentence ("It gives off X."). Returns the reworded text
+    (possibly unchanged when no rule applies, so unrelated
+    answers keep their exact wording)."""
     text = (sentence or "").strip()
     text = re.sub(r"\$[^$]*\$", "", text)
     text = re.sub(r"\([^)]*\)", "", text)
+    # Drop an equation fragment ("... -> ...") with its clause.
+    text = re.sub(r"[,;]\s*[^,;.]*->[^,;.]*", "", text)
+    text = re.sub(r"\s+", " ", text).strip(" .")
+    second = ""
+    # Trailing "..., releasing X as a by-product" -> second sentence.
+    m = re.search(r",\s*releasing\s+(.+?)\s+as a by-product\s*$", text, flags=re.I)
+    if m:
+        second = "It gives off " + m.group(1).strip() + "."
+        text = text[:m.start()].strip()
     low = text.lower()
     for old, new in _SIMPLIFY:
         if old in low:
             text = re.sub(re.escape(old), new, text, flags=re.I)
             low = text.lower()
-    return re.sub(r"\s+", " ", text).strip(" .") + ("." if text else "")
+    text = re.sub(r"\s+", " ", text).strip(" .")
+    out = text + ("." if text else "")
+    if second:
+        out += " " + second
+    return out
 
 
 def _shorten_answer(bot_a: str) -> str:
@@ -287,14 +310,18 @@ def resolve_followup(text, context):
         first = _sentences(bot_a)
         return {"kind": "simpler",
                 "answer": f"In simple terms: {simplify_sentence(first[0])}" if first else bot_a}
-    # "Make it shorter." — strictly shorter than the previous answer:
-    # the first sentence only (or the first clause for a
-    # one-sentence answer), never the whole answer again.
+    # "Make it shorter." — strictly shorter than the CURRENT
+    # answer: the latest bot text (which may itself be a simpler
+    # wrapper), first sentence/clause only, never the whole answer
+    # again. Wrapper prefixes are stripped first so a chain of
+    # follow-ups does not stack "Short version: In simple terms:".
     if re.search(r"\b(make it|make that) shorter\b|\bshorter version\b|\bshort version\b", low):
-        if not bot_a:
+        latest = getattr(context, "last_bot_response", "") or bot_a
+        if not latest:
             return need_context("answer")
+        current = re.sub(r"^(?:In simple terms:\s*|Short version:\s*)+", "", latest.strip())
         return {"kind": "shorter",
-                "answer": f"Short version: {_shorten_answer(bot_a)}"}
+                "answer": f"Short version: {_shorten_answer(current)}"}
     # "Give me another example." — topic must be retained, not re-asked.
     # But "another example of <new topic>" names its own topic; let the
     # normal pipeline answer that topic instead of forcing old context.

@@ -435,7 +435,9 @@ document.getElementById("fileInput").addEventListener("change", async (e) => {
     typingEl.classList.add("hidden");
     if (!res.ok) { addMessage("Upload failed: " + (data.error || "Unknown error."), "bot"); return; }
     let uploadMessage = data.message + "\n\nPreview: " + data.summary_preview;
-    if (data.rag && data.rag.status === "failed") uploadMessage += "\n\nDocument preview is ready, but semantic indexing is unavailable: " + (data.rag.error || "try again later.");
+    // Never echo a server error into chat: provider/API detail is
+    // internal only. A failed index gets one fixed neutral line.
+    if (data.rag && data.rag.status === "failed") uploadMessage += "\n\nDocument preview is ready, but document search indexing is unavailable right now. You can still read the preview above.";
     addMessage(uploadMessage, "bot", data);
   } catch (err) {
     typingEl.classList.add("hidden");

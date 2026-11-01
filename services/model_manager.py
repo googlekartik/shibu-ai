@@ -54,6 +54,24 @@ import os
 import re
 import shutil
 
+# Last failed provider attempt in this process, for /api/llm/status
+# diagnostics: provider + HTTP status + response top-level keys
+# ONLY. No values, no payload, no key. Updated by generate() on a
+# Meta failure; read (never written) by status(). ModelManager
+# instances are created per request, so process-level state is
+# what makes the diagnostic survive to the next status call.
+_LAST_PROVIDER_DIAGNOSTIC: dict = {}
+
+
+def _record_provider_diagnostic(provider: str, diagnostic) -> None:
+    if isinstance(diagnostic, dict):
+        _LAST_PROVIDER_DIAGNOSTIC.clear()
+        _LAST_PROVIDER_DIAGNOSTIC.update({
+            "provider": provider,
+            "status": diagnostic.get("status"),
+            "response_keys": list(diagnostic.get("response_keys") or []),
+        })
+
 # RAM thresholds used for automatic selection (see module docstring).
 SMALL_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 MEDIUM_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
@@ -212,6 +230,7 @@ class ModelManager:
             "cached": is_cached(self.model_id) if self.mode == "local" and self.model_id else None,
             "recommendation": self._recommendation,
             "error": self._load_error,
+            "provider_error": dict(_LAST_PROVIDER_DIAGNOSTIC) or None,
         }
         if self.mode == "off":
             if self.cloud_only:
@@ -306,6 +325,11 @@ class ModelManager:
             if text:
                 self.effective_model = self.model_id
                 return text, err
+            # Record the safe diagnostic (status + keys only) so
+            # /api/llm/status can explain the failure without
+            # exposing payload content.
+            _record_provider_diagnostic("meta", getattr(svc, "last_diagnostic", None) or
+                                        {"status": None, "response_keys": []})
             # Provider fallthrough: a failed first provider must not
             # end the answer when another configured provider can
             # still answer. Try OpenAI next, then the Hugging Face

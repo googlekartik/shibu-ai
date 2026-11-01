@@ -414,7 +414,7 @@ class RAGService:
         manager = ModelManager()
         if manager.mode == "off":
             answer = ("From your documents, the most relevant passages are:\n\n" + evidence +
-                      "\n\nNote: No language model is enabled, so this is a direct retrieval result, not an AI-generated summary.")
+                      "\n\nNote: This is a direct retrieval result, not an AI-generated summary.")
             return {"answer": answer, "sources": sources, "backend": cfg["backend"], "evidence_found": True, "error": ""}
         extra_lines = []
         if context is not None:
@@ -437,7 +437,8 @@ class RAGService:
             # Evidence was found, so do not lose it: return the
             # passages directly, labelled, instead of an error that
             # makes the caller fall through and web-search instead.
-            answer = ("The language model could not summarise this time, so here are the most relevant passages from your documents:\n\n"
+            # No provider/model detail is disclosed to the user.
+            answer = ("Here are the most relevant passages from your documents:\n\n"
                       + evidence +
                       "\n\nNote: This is a direct retrieval result, not an AI-generated summary.")
             return {"answer": answer, "sources": sources, "backend": cfg["backend"], "evidence_found": True, "error": ""}

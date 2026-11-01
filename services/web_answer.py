@@ -15,7 +15,7 @@ answer instead of a raw list:
 No external dependencies, and no LLM is needed for this step.
 """
 
-from utils.text_processing import clean_text, extract_key_sentences
+from utils.text_processing import clean_text, extract_key_sentences, split_into_sentences
 import re
 
 _GENERIC_WORDS = frozenset({
@@ -104,7 +104,87 @@ def filter_results(query: str, results) -> list:
 
 _IMPERATIVE_VERBS = ("boil", "pour", "add", "stir", "heat", "place", "put", "fill",
                     "wait", "let", "use", "take", "remove", "cover", "steep",
-                    "brew", "mix", "chop", "bake", "cook", "rinse", "dry")
+                    "brew", "mix", "chop", "bake", "cook", "rinse", "dry",
+                    "turn", "set", "bring", "strain", "serve", "drink", "enjoy",
+                    "slice", "whisk", "measure", "preheat", "season", "peel",
+                    "grate", "crush", "shake", "squeeze", "spread", "toast",
+                    "freeze", "thaw", "wash", "scrub", "cut", "fold", "knead",
+                    "roll", "sprinkle", "drizzle", "garnish", "check", "ensure",
+                    "avoid", "start", "begin", "continue", "repeat", "allow",
+                    "leave", "keep", "store", "open", "close", "press", "tap",
+                    "click", "type", "enter", "select", "choose", "follow",
+                    "create", "make", "write", "read", "watch", "listen")
+# Sequence openers that precede the real imperative verb.
+_SEQUENCE_WORDS = ("first", "then", "next", "after", "finally", "now", "once")
+
+
+def _imperative_verb(sentence: str):
+    """The imperative verb a step starts with, or None.
+
+    "Boil water." -> boil. "First, pour..." -> pour. A sentence
+    starting with anything else (a headline, a description) is
+    not an instruction step, however relevant its words are.
+    """
+    words = re.findall(r"[a-z']+", (sentence or "").lower())
+    if not words:
+        return None
+    first = words[0]
+    if first in _SEQUENCE_WORDS and len(words) > 1:
+        first = words[1]
+    if first in _IMPERATIVE_VERBS:
+        return first
+    return None
+
+
+def _is_title_like(sentence: str) -> bool:
+    """Headlines and article titles masquerading as steps: a
+    trailing '!', a site/brand suffix after ' - ', or a colon
+    headline that restates the query ('How to Make Tea: ...')."""
+    text = (sentence or "").strip()
+    if not text:
+        return True
+    if text.endswith("!"):
+        return True
+    # A fragment that is only the tail of a previous headline
+    # ("- Brew Buch.") is a title suffix, never a step.
+    if text[0] in "-–•":
+        return True
+    if text.lower().startswith("how to"):
+        return True
+    if " - " in text:
+        suffix = text.rsplit(" - ", 1)[1].strip()
+        if len(suffix.split()) <= 3 and not _imperative_verb(suffix):
+            return True
+    if ":" in text:
+        head = text.split(":", 1)[0].strip()
+        if len(head.split()) <= 7 and _imperative_verb(head) is None:
+            return True
+    return False
+
+
+def _howto_steps(snippets, max_points: int = 3) -> list:
+    """Steps built ONLY from imperative instruction sentences in
+    the result bodies. Titles are never steps: when no imperative
+    sentence exists, the result is empty rather than a headline."""
+    steps, seen = [], set()
+    for snippet in snippets or []:
+        for sentence in split_into_sentences(snippet):
+            key = sentence.lower().strip()
+            if key in seen:
+                continue
+            seen.add(key)
+            if _imperative_verb(sentence) is None:
+                continue
+            if _is_title_like(sentence):
+                continue
+            if len(sentence.split()) < 3:
+                # A two-word fragment ("Brew Buch.") is a title tail,
+                # not an instruction a user can follow.
+                continue
+            steps.append(sentence)
+            if len(steps) >= max_points:
+                return steps
+    return steps
 _META_WORDS = ("wikihow", "article", "will teach", "explains how", "guide explains",
               "with pictures", "read more", "learn more")
 
@@ -135,13 +215,15 @@ def summarise_web_results(query: str, results, max_points: int = 3):
     results = filter_results(query, results)
     snippets = [clean_text(r.get("snippet", "")) for r in results if r.get("snippet")]
     titles = [clean_text(r.get("title", "")) for r in results if r.get("title")]
-    points = extract_key_sentences(snippets, query, max_sentences=max_points)
     if _is_howto_query(query):
-        # Re-rank a wider pool so real steps beat article blurbs.
-        pool = extract_key_sentences(snippets, query, max_sentences=8)
-        pool.sort(key=lambda s: _howto_score(s), reverse=True)
-        points = pool[:max_points]
-    if not points and titles:
+        # Steps come ONLY from imperative sentences in the bodies.
+        # Titles are never steps, and there is no title fallback:
+        # an answer with no real steps says so by being empty here
+        # rather than dressing a headline up as an instruction.
+        points = _howto_steps(snippets, max_points)
+    else:
+        points = extract_key_sentences(snippets, query, max_sentences=max_points)
+    if not points and titles and not _is_howto_query(query):
         # Fall back to titles when snippets are empty fragments.
         points = titles[:max_points]
     summary = " ".join(points)

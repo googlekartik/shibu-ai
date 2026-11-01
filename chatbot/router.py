@@ -17,7 +17,7 @@ from services.pdf_service import PDFService
 from services.web_search_service import WebSearchService
 from services.web_answer import format_web_answer, clean_search_topic, filter_results
 from services.code_service import (generate_code, debug_code, compare as compare_topics,
-                                  detect_code_request, generate_code_for)
+                                  detect_code_request, generate_code_for, explain_code)
 from services.code_runner import run_python_code
 from services.document_service import summarize as summarize_doc, answer_from_document, make_notes as make_doc_notes
 from services.file_generation_service import generate_pptx, generate_docx, generate_xlsx
@@ -811,7 +811,11 @@ def process_single_message(message: str, context, processing_ms=0.0, web_search_
             _task, _lang = _code_req
             code, expl = generate_code_for(_task, _lang)
             _fence = "javascript" if _lang == "javascript" else "python"
-            payload = format_response(text=f"{expl}\n\n```{_fence}\n{code}\n```",
+            _bullets = explain_code(_task, _lang)
+            _code_text = f"{expl}\n\n```{_fence}\n{code}\n```"
+            if _bullets:
+                _code_text += f"\n\nHow it works:\n{_bullets}"
+            payload = format_response(text=_code_text,
                 intent="CODE_GENERATION", rule_id="code_template", confidence=0.90, tool="Code templates", action="Generate code", processing_ms=processing_ms)
             context.last_code_task = _task
             context.last_code_language = _lang

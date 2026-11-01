@@ -197,6 +197,103 @@ def generate_code_for(task_key: str, language: str = "python"):
                   "It is broken into small steps so you can follow it line by line.")
 
 
+# Per-line explanations, one bullet per key line, so a code answer
+# never claims to be "broken into small steps" without showing the
+# steps. Bullets name the exact operations in the template above.
+_CODE_EXPLANATIONS = {
+    "factorial": {
+        "python": [
+            "`result = 1` starts the running product at 1.",
+            "`for i in range(2, n + 1)` walks through 2, 3, and so on up to n.",
+            "`result *= i` multiplies the running product by each number.",
+            "`return result` gives back n! — `print(factorial(5))` shows 120.",
+        ],
+        "javascript": [
+            "`let result = 1` starts the running product at 1.",
+            "`for (let i = 2; i <= n; i++)` walks through 2, 3, and so on up to n.",
+            "`result *= i` multiplies the running product by each number.",
+            "`return result` gives back n! — `console.log(factorial(5))` shows 120.",
+        ],
+    },
+    "fibonacci": {
+        "python": [
+            "`a, b = 0, 1` starts the sequence with 0 and 1.",
+            "Each loop appends `a` to the list, then moves on with `a, b = b, a + b`.",
+            "`return out` gives back the first n Fibonacci numbers.",
+        ],
+        "javascript": [
+            "`let a = 0, b = 1` starts the sequence with 0 and 1.",
+            "Each loop pushes `a`, then moves on with `[a, b] = [b, a + b]`.",
+            "`return out` gives back the first n Fibonacci numbers.",
+        ],
+    },
+    "reverse string": {
+        "python": [
+            "`s[::-1]` slices the string backwards, from the end to the start.",
+            "`return` gives back the reversed string.",
+            "`print(reverse_string(\"Shibu\"))` shows \"ubihS\".",
+        ],
+        "javascript": [
+            "`s.split(\"\")` turns the string into a list of characters.",
+            "`.reverse()` reverses that list, and `.join(\"\")` joins it back into a string.",
+            "`console.log(reverseString(\"Shibu\"))` shows \"ubihS\".",
+        ],
+    },
+    "sort": {
+        "python": [
+            "`numbers.sort()` sorts the list in place, smallest first.",
+            "`print(numbers)` shows [1, 2, 5, 7, 9].",
+        ],
+        "javascript": [
+            "`numbers.sort((a, b) => a - b)` sorts numerically, smallest first (the comparator is needed: without it, sort compares as text).",
+            "`console.log(numbers)` shows [1, 2, 5, 7, 9].",
+        ],
+    },
+    "prime": {
+        "python": [
+            "Numbers below 2 are not prime, so they return `False` straight away.",
+            "The loop tries divisors from 2 up to the square root of n (`int(n ** 0.5) + 1`).",
+            "If any divisor divides n evenly (`n % i == 0`), n is not prime.",
+            "Otherwise the function returns `True`.",
+        ],
+        "javascript": [
+            "Numbers below 2 are not prime, so they return `false` straight away.",
+            "The loop tries divisors from 2 up to the square root of n (`Math.sqrt(n)`).",
+            "If any divisor divides n evenly (`n % i === 0`), n is not prime.",
+            "Otherwise the function returns `true`.",
+        ],
+    },
+    "even odd": {
+        "python": [
+            "`number % 2` is the remainder after dividing by 2.",
+            "A remainder of 0 prints \"Even\"; any other remainder prints \"Odd\".",
+        ],
+        "javascript": [
+            "`number % 2` is the remainder after dividing by 2.",
+            "A remainder of 0 logs \"Even\"; any other remainder logs \"Odd\".",
+        ],
+    },
+    "palindrome": {
+        "python": [
+            "Lowercasing and removing spaces makes the check ignore case and spacing.",
+            "`s == s[::-1]` is True only when the cleaned string reads the same backwards.",
+            "`print(is_palindrome(\"madam\"))` shows True.",
+        ],
+        "javascript": [
+            "Lowercasing and removing spaces makes the check ignore case and spacing.",
+            "`clean === clean.split(\"\").reverse().join(\"\")` is true only when the cleaned string reads the same backwards.",
+            "`console.log(isPalindrome(\"madam\"))` shows true.",
+        ],
+    },
+}
+
+
+def explain_code(task_key: str, language: str = "python") -> str:
+    """Bullet list explaining each key line of a template, or ""."""
+    bullets = (_CODE_EXPLANATIONS.get(task_key) or {}).get(language) or []
+    return "\n".join(f"- {b}" for b in bullets)
+
+
 def detect_code_request(request: str, last_task=None):
     """Return (task_key, language) for a code request, or None.
 

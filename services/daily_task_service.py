@@ -129,6 +129,17 @@ def _work_range_hours(message: str):
     return to24(start, start_ampm), to24(end, end_ampm)
 
 
+def _fmt_hour_12(hour: int) -> str:
+    """24h hour -> '9am' / '5pm' for plan slot labels."""
+    if hour == 0:
+        return "12am"
+    if hour < 12:
+        return f"{hour}am"
+    if hour == 12:
+        return "12pm"
+    return f"{hour - 12}pm"
+
+
 def _template_plan(message: str) -> str:
     """Timetable from the activities the user named, in the order
     they appear. Times the user gave are kept; the rest are
@@ -146,7 +157,7 @@ def _template_plan(message: str) -> str:
             activities.append(chunk)
     if not activities:
         activities = ["Work", "Break", "Study"]
-    lines = ["Your day plan (template — the language model is not available, so times marked suggested are suggestions):", ""]
+    lines = ["Your day plan:", ""]
     work = _work_range_hours(message)
     # Suggested slots must never clash with a stated work range:
     # activities without a given time go before work or after it.
@@ -197,8 +208,53 @@ def _template_write(message: str) -> str:
             f"I will make sure my work is covered and catch up on anything I miss.\n\n"
             f"Thank you for your understanding.\n\n"
             f"Yours sincerely,\n[Your name]")
-    return ("Template email (the language model is not available) — fill in the [bracketed] details:\n\n"
+    return ("Fill in the [bracketed] details:\n\n"
             + subject + "\n\n" + body)
+
+
+def _template_week_plan(message: str) -> str:
+    """Day-by-day week timetable from the activities the user named.
+
+    This is the fallback used when no drafted plan is available, so
+    it must stand on its own: gym is assigned to three specific
+    days, study is spread over weekday evenings, work keeps its
+    stated hours Monday to Friday, and the family dinner is on
+    Sunday evening. Times the user did not give are marked
+    suggested; nothing here mentions how the plan was produced.
+    """
+    low = (message or "").lower()
+    work = _work_range_hours(message)
+    work_label = (f"{_fmt_hour_12(work[0])} to {_fmt_hour_12(work[1])}"
+                  if work else "Work")
+    has_gym = "gym" in low
+    has_study = "study" in low
+    study_label = "study for an exam" if "exam" in low else "study"
+    has_dinner = "dinner" in low
+    if not (work or has_gym or has_study or has_dinner):
+        # Nothing recognisable to distribute: reuse the day-plan
+        # template rather than inventing a week.
+        return _template_plan(message).replace("Your day plan:", "Your week plan:", 1)
+    weekdays = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday")
+    gym_days = {"Monday", "Wednesday", "Friday"}
+    lines = ["Your week plan:", ""]
+    for day in ("Monday", "Tuesday", "Wednesday", "Thursday",
+                "Friday", "Saturday", "Sunday"):
+        day_lines = []
+        if day in weekdays and work:
+            day_lines.append(f"- {work_label}: Work")
+        if has_gym and day in gym_days:
+            day_lines.append("- 18:00 (suggested): gym")
+        if has_study and day in weekdays:
+            day_lines.append(f"- 19:00 (suggested): {study_label} (1 hour)")
+        if day == "Sunday" and has_dinner:
+            day_lines.append("- 20:00 (suggested): family dinner")
+        lines.append(f"{day}:")
+        if day_lines:
+            lines.extend(day_lines)
+        else:
+            lines.append("- Rest day — no fixed plans.")
+        lines.append("")
+    return "\n".join(lines).rstrip()
 
 
 def unavailable_howto_payload(message: str, context, processing_ms: float = 0.0):
@@ -206,9 +262,9 @@ def unavailable_howto_payload(message: str, context, processing_ms: float = 0.0)
     the web could answer. Returning this — instead of falling
     through to the rule engine — is what stops a how-to question
     being answered with an unrelated greeting rule."""
-    text = ("I could not look up steps for that right now: the language model is not "
-            "available and no web results came back. Please try again in a moment, or "
-            "rephrase with the exact task, for example: 'How to make a cup of tea'.")
+    text = ("I could not look up steps for that right now, and no web results came back. "
+            "Please try again in a moment, or rephrase with the exact task, "
+            "for example: 'How to make a cup of tea'.")
     payload = format_response(
         text=text, intent="DAILY_TASK", rule_id="daily_howto_unavailable", confidence=0.90,
         tool="Daily tasks", action="How-to unavailable (no model, no web results)",
@@ -241,18 +297,24 @@ def build_daily_task_payload(message: str, context, processing_ms: float = 0.0):
         # The web fallback in the router is the honest next step for
         # a how-to; returning None here would lose that chance.
         return None, True
-    template = _template_plan(message) if kind == "plan" else _template_write(message)
-    # The note names only the friendly error category (quota vs
-    # generic failure) — never raw provider text, model names, or
-    # URLs, which _friendly_error already stripped.
-    _friendly = (error or "the language model could not draft this").strip()
-    _friendly = _friendly[:1].upper() + _friendly[1:]
-    note = ("The language model is not enabled, so this is a basic template. "
-            if error == "off" else
-            f"{_friendly}, so here is a basic template instead. ")
+    if kind == "plan" and "week" in message.lower():
+        template = _template_week_plan(message)
+    else:
+        template = _template_plan(message) if kind == "plan" else _template_write(message)
+    if error and "no credits left" in error:
+        # Genuinely quota-labelled failure only: the one friendly
+        # line the quota behaviour requires, with no provider name,
+        # URL, or raw detail. Every other failure delivers the
+        # template cleanly, with no mention of the failure at all.
+        template += ("\n\nNote: the language model's account has no credits "
+                     "left, so this is a fill-in version you can complete.")
+    # The fallback is otherwise delivered cleanly: no mention of
+    # the language model, providers, or errors — the user only
+    # ever sees the plan/email itself. The internal error category
+    # stays in logs.
     payload = format_response(
-        text=note + "\n\n" + template, intent="DAILY_TASK", rule_id=rule_id, confidence=0.70,
-        tool="Template (no language model)", action="Draft from a template",
+        text=template, intent="DAILY_TASK", rule_id=rule_id, confidence=0.70,
+        tool="Template", action="Draft from a template",
         processing_ms=processing_ms)
     context.add_exchange(message, payload["response"], "DAILY_TASK", rule_id, 0.70)
     return payload, False
