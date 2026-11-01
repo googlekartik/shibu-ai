@@ -237,29 +237,54 @@ def _record_query_event(message, payload, processing_ms):
         pass
 
 
-# Onboarding avatars: illustrated assets in static/avatars/. The first
-# avatar is also the welcome image on /login. Files are swapped by
+# Onboarding characters: illustrated assets in static/avatars/. The first
+# character is also the welcome image on /login. Files are swapped by
 # replacing these SVGs — no code change is needed for new artwork.
+# Character ids are stable (avatar-1..avatar-5) so saved profiles
+# keep resolving. AVATAR_ALIASES keeps profiles saved under the
+# original 2026 avatar ids (maya/aria/zara/luna/nia) working: they
+# normalise to the same files. The artwork is original flat
+# illustration inspired by each character's signature look, not
+# copied official art.
 AVATARS = [
-    {"id": "maya", "name": "Maya", "file": "avatars/avatar-1.svg",
-     "style": "Short black bob, blue outfit", "color": "#7c5cff"},
-    {"id": "aria", "name": "Aria", "file": "avatars/avatar-2.svg",
-     "style": "Long brown wavy hair, green outfit", "color": "#10b981"},
-    {"id": "zara", "name": "Zara", "file": "avatars/avatar-3.svg",
-     "style": "Curly red hair, purple outfit", "color": "#a855f7"},
-    {"id": "luna", "name": "Luna", "file": "avatars/avatar-4.svg",
-     "style": "Blonde pixie cut, pink outfit", "color": "#f472b6"},
-    {"id": "nia", "name": "Nia", "file": "avatars/avatar-5.svg",
-     "style": "Braided hair, teal outfit", "color": "#0d9488"},
+    {"id": "avatar-1", "name": "Monkey D. Luffy", "file": "avatars/avatar-1.svg",
+     "style": "Straw hat, scar, red shirt — One Piece", "color": "#dc2626"},
+    {"id": "avatar-2", "name": "Levi Ackerman", "file": "avatars/avatar-2.svg",
+     "style": "Undercut, cravat, Survey Corps jacket — Attack on Titan", "color": "#475569"},
+    {"id": "avatar-3", "name": "Satoru Gojo", "file": "avatars/avatar-3.svg",
+     "style": "White hair, blindfold, dark coat — Jujutsu Kaisen", "color": "#2563eb"},
+    {"id": "avatar-4", "name": "Itachi Uchiha", "file": "avatars/avatar-4.svg",
+     "style": "Long hair, forehead protector, dark cloak — Naruto", "color": "#7f1d1d"},
+    {"id": "avatar-5", "name": "Eren Yeager", "file": "avatars/avatar-5.svg",
+     "style": "Brown hair, Survey Corps jacket — Attack on Titan", "color": "#0d9488"},
 ]
 AVATAR_IDS = {a["id"] for a in AVATARS}
+AVATAR_ALIASES = {"maya": "avatar-1", "aria": "avatar-2", "zara": "avatar-3",
+                  "luna": "avatar-4", "nia": "avatar-5"}
+
+
+def _canonical_avatar_id(avatar_id):
+    """Map a stored avatar id to its canonical id, honouring the
+    original 2026 ids as aliases. Unknown ids return None."""
+    if avatar_id in AVATAR_IDS:
+        return avatar_id
+    return AVATAR_ALIASES.get(avatar_id)
+
+
+def _character_name(avatar_id):
+    canonical = _canonical_avatar_id(avatar_id)
+    for a in AVATARS:
+        if a["id"] == canonical:
+            return a["name"]
+    return None
 QUICK_ACTIONS = ["Search the web", "Ask a question", "Learn something new",
                  "Write or create something", "Help me with something else"]
 
 
 def _avatar_url(avatar_id):
+    canonical = _canonical_avatar_id(avatar_id)
     for a in AVATARS:
-        if a["id"] == avatar_id:
+        if a["id"] == canonical:
             return "/static/" + a["file"]
     return "/static/shibu.png"
 
@@ -274,6 +299,7 @@ def _profile():
     if not user_id:
         return {"logged_in": False, "user_id": None, "display_name": "",
                 "avatar_id": None, "avatar_url": "/static/shibu.png",
+                "character_name": None,
                 "onboarding_completed": False, "onboarding_stage": None}
     profile = {"logged_in": True, "user_id": user_id,
                "display_name": session.get("google_display_name", "") or "",
@@ -282,8 +308,8 @@ def _profile():
                "onboarding_stage": session.get("onboarding_stage")}
     try:
         user = _sqlite_store().get_or_create_user(user_id)
-        if user.get("avatar_id") in AVATAR_IDS:
-            profile["avatar_id"] = user["avatar_id"]
+        if _canonical_avatar_id(user.get("avatar_id")):
+            profile["avatar_id"] = _canonical_avatar_id(user["avatar_id"])
         if user.get("display_name"):
             profile["display_name"] = user["display_name"]
         if user.get("onboarding_completed"):
@@ -291,11 +317,11 @@ def _profile():
             profile["onboarding_stage"] = None
     except Exception:
         pass
-    if profile["avatar_id"] not in AVATAR_IDS:
-        profile["avatar_id"] = None
+    profile["avatar_id"] = _canonical_avatar_id(profile["avatar_id"])
     if not profile["onboarding_completed"] and not profile["onboarding_stage"]:
         profile["onboarding_stage"] = "ask_name" if profile["avatar_id"] else "need_avatar"
     profile["avatar_url"] = _avatar_url(profile["avatar_id"])
+    profile["character_name"] = _character_name(profile["avatar_id"])
     return profile
 
 
@@ -421,11 +447,11 @@ def chat():
     profile = _profile()
     if profile["logged_in"] and not profile["onboarding_completed"]:
         if profile["onboarding_stage"] == "need_avatar":
-            return jsonify({"response": "Please choose an avatar first.",
+            return jsonify({"response": "Choose your character to continue.",
                             "intent": "ONBOARDING", "rule_id": "onboarding_avatar",
                             "confidence": 1.0, "confidence_label": "HIGH",
-                            "tool": "Onboarding", "action": "Avatar selection required",
-                            "needs_avatar": True}), 200
+                            "tool": "Onboarding", "action": "Character selection required",
+                            "needs_avatar": True, "avatars": AVATARS}), 200
         if profile["onboarding_stage"] == "ask_name":
             name = message_or_error.strip()
             if len(name) > 60 or "?" in name:
@@ -449,6 +475,10 @@ def chat():
         _restore_context(ctx, _session_user_id(), profile["display_name"])
         if profile["display_name"]:
             ctx.display_name = profile["display_name"]
+        # Selected character persona for identity answers and the LLM
+        # system prompt. Anonymous users get no character name, so
+        # identity answers keep their plain "Shibu AI" wording.
+        ctx.character_name = profile.get("character_name") or ""
     # RAG attempt, AFTER onboarding and BEFORE the cache/router:
     # rules and maths keep priority (see below: RAG only runs when
     # the rule match is UNKNOWN / low-confidence, or the user
@@ -535,7 +565,9 @@ def chat():
                 _record_query_event(message_or_error, payload, timer.elapsed_ms())
                 return jsonify(payload)
     try:
-        payload = process_message(message_or_error, ctx, processing_ms=0.0, web_search_enabled=web_search_enabled)
+        payload = process_message(message_or_error, ctx, processing_ms=0.0,
+                                  web_search_enabled=web_search_enabled,
+                                  character_name=getattr(ctx, "character_name", "") or "")
         payload["processing_ms"] = round(timer.elapsed_ms(), 1)
         # No extra HF call here: the router already tries the LLM (via
         # ModelManager) for UNKNOWN / low-confidence answers, labelled
@@ -827,7 +859,7 @@ def set_avatar():
     if not profile["logged_in"]:
         return jsonify({"error": "Please sign in first."}), 401
     data = request.get_json(silent=True) or {}
-    avatar_id = data.get("avatar_id")
+    avatar_id = _canonical_avatar_id(data.get("avatar_id"))
     if avatar_id not in AVATAR_IDS:
         return jsonify({"error": "Unknown avatar. Choose one of: " + ", ".join(sorted(AVATAR_IDS))}), 400
     # Changing an avatar later must not restart the welcome flow for

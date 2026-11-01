@@ -37,6 +37,30 @@ pdf_service = PDFService()
 search_service = WebSearchService()
 
 
+def _personalize_identity(text: str, rule_id: str, character_name: str) -> str:
+    """Name the selected character as Shibu AI's persona in identity
+    answers, without changing any other answer. With no character
+    selected the static "Shibu AI" wording is returned unchanged, so
+    anonymous chat is identical to before. Never claims to be Muse,
+    Meta AI, another assistant, or human."""
+    if not character_name:
+        return text
+    if rule_id == "about_bot":
+        prefix = "I'm Shibu AI, a Rule-Based Intelligent Chatbot: "
+        if text.startswith(prefix):
+            return "I'm " + character_name + ", Shibu AI's character: " + text[len(prefix):]
+    elif rule_id == "bot_name":
+        prefix = "I'm Shibu AI — your Rule-Based Intelligent Chatbot."
+        if text.startswith(prefix):
+            return ("I'm " + character_name + " — Shibu AI's character and your "
+                    "Rule-Based Intelligent Chatbot." + text[len(prefix):])
+    elif rule_id == "conversation_human_robot":
+        old = "I'm Shibu AI, a rule-based chatbot program."
+        if old in text:
+            return text.replace(old, "I'm " + character_name + ", the Shibu AI character, a chatbot program.", 1)
+    return text
+
+
 def _is_follow_up(text_norm: str) -> bool:
     return bool(re.search(r"\bwhat is it used for\b|\bwhat is it\b|\bit used for\b|\btell me more\b|\bmore about it\b", text_norm))
 
@@ -252,7 +276,7 @@ def _web_fallback_answer(text: str, context, processing_ms=0.0):
     return payload
 
 
-def process_single_message(message: str, context, processing_ms=0.0, web_search_enabled=True):
+def process_single_message(message: str, context, processing_ms=0.0, web_search_enabled=True, character_name=""):
     """Process one message. Returns the API payload dict."""
     text = message.strip()
     norm = normalize_for_matching(text)
@@ -752,6 +776,7 @@ def process_single_message(message: str, context, processing_ms=0.0, web_search_
             if web_payload is not None:
                 return web_payload
     adapted = _adapt_to_preferences(rule["response"], context)
+    adapted = _personalize_identity(adapted, rule["rule_id"], character_name)
     if rule["intent"] != "UNKNOWN" and rule["confidence"] < 0.45:
         adapted += "\n\nNote: My confidence here is low, so please double-check this — I am not presenting a guess as a fact."
     payload = format_response(
@@ -765,7 +790,7 @@ def process_single_message(message: str, context, processing_ms=0.0, web_search_
     return payload
 
 
-def process_message(message: str, context, processing_ms=0.0, web_search_enabled=True):
+def process_message(message: str, context, processing_ms=0.0, web_search_enabled=True, character_name=""):
     """Wrapper: handle multi-step instructions, then a single message.
 
     Multi-step example: "What is Python? then calculate 25% of 800"
@@ -780,7 +805,7 @@ def process_message(message: str, context, processing_ms=0.0, web_search_enabled
             responses = []
             last_payload = None
             for part in parts:
-                last_payload = process_single_message(part, context, processing_ms, web_search_enabled=web_search_enabled)
+                last_payload = process_single_message(part, context, processing_ms, web_search_enabled=web_search_enabled, character_name=character_name)
                 responses.append(last_payload["response"])
             combined = format_response(
                 text="\n\n---\n\n".join(responses),
@@ -789,7 +814,7 @@ def process_message(message: str, context, processing_ms=0.0, web_search_enabled
                 processing_ms=processing_ms)
             context.add_exchange(text, combined["response"], "MULTI_STEP", "multi_step", 0.90)
             return combined
-    payload = process_single_message(message, context, processing_ms, web_search_enabled=web_search_enabled)
+    payload = process_single_message(message, context, processing_ms, web_search_enabled=web_search_enabled, character_name=character_name)
     # Environment table, appended AFTER a normal answer, only when the
     # message actually describes an environment scenario (see
     # should_analyze). Explicit classify requests were already

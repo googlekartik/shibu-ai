@@ -14,13 +14,21 @@
     <button id="detailsBtn" type="button" class="text-btn">Details</button>
     <button id="clearBtn" type="button" class="text-btn">Clear</button>
     <span id="userLabel" class="muted small hidden"></span>
-    <a id="userAvatarLink" href="/avatar" class="hidden" title="Change avatar"><img id="userAvatar" class="avatar" src="{{ url_for('static', filename='shibu.png') }}" alt="Your avatar"></a>
+    <a id="userAvatarLink" href="/avatar" class="hidden" title="Change character"><img id="userAvatar" class="avatar" src="{{ url_for('static', filename='shibu.png') }}" alt="Your character"></a>
     <a id="loginBtn" href="/login" class="text-btn" style="text-decoration:none;">Sign in</a>
     <button id="logoutBtn" type="button" class="text-btn hidden">Log out</button>
   </div>
 </header>
 
 <div id="announcement" class="announcement hidden"><span id="announcementText"></span><button id="announcementDismiss" type="button" aria-label="Dismiss announcement">×</button></div>
+
+<div class="app-shell">
+<nav id="rail" class="rail" aria-label="Quick actions">
+  <button id="railChat" type="button" class="rail-btn" title="Chat" aria-label="Chat"><span class="rail-icon" aria-hidden="true">💬</span><span class="rail-label">Chat</span></button>
+  <button id="railHistory" type="button" class="rail-btn" title="Chats" aria-label="Chats"><span class="rail-icon" aria-hidden="true">🕘</span><span class="rail-label">Chats</span></button>
+  <button id="railUpload" type="button" class="rail-btn" title="Upload a document" aria-label="Upload a document"><span class="rail-icon" aria-hidden="true">📎</span><span class="rail-label">Upload</span></button>
+  <a id="railCharacter" href="/avatar" class="rail-btn" title="Choose your character" aria-label="Choose your character"><span class="rail-icon" aria-hidden="true">👤</span><span class="rail-label">Character</span></a>
+</nav>
 
 <div class="layout">
 <aside id="sidebar" class="sidebar">
@@ -52,7 +60,7 @@
   <div id="typing" class="typing hidden">Thinking…</div>
 
   <form id="composer" class="composer">
-    <button id="attachBtn" type="button" aria-label="Upload a document">📎</button>
+    <button id="attachBtn" type="button" aria-label="Upload a document">+</button>
     <input id="fileInput" type="file" accept=".pdf,.docx,.xlsx,.txt,.md,.html,.htm,.csv" hidden>
     <textarea id="input" rows="1" placeholder="Ask anything…"></textarea>
     <button id="micBtn" type="button" aria-label="Voice input">🎤</button>
@@ -61,6 +69,18 @@
   <p class="footnote">Type naturally — e.g. “What is Python?”, “Calculate 25% of 800”, “Search latest AI news”, or “Create a PDF about Python”.</p>
 </main>
 </div>
+</div>
+
+<aside id="characterPanel" class="character-panel" aria-label="Character">
+  <div class="panel-inner">
+    <img id="panelAvatar" class="panel-avatar" src="{{ url_for('static', filename='shibu.png') }}" alt="Selected character">
+    <div id="panelName" class="panel-name">Shibu AI</div>
+    <div id="panelStatus" class="panel-status muted small">Not signed in</div>
+    <h3 class="history-title panel-heading">Recent chats</h3>
+    <ul id="panelHistoryList" class="history-list"></ul>
+    <p id="panelHistoryEmpty" class="muted small">No history yet — ask something first!</p>
+  </div>
+</aside>
 </div>
 
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>

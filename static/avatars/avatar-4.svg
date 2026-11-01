@@ -1,10 +1,16 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" role="img" aria-label="Luna avatar">
-  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f472b6"/><stop offset="1" stop-color="#fbbf24"/></linearGradient></defs>
-  <circle cx="120" cy="120" r="120" fill="url(#g)"/>
-  <path d="M70 110 Q65 55 120 52 Q175 55 170 110 Q160 82 120 80 Q80 82 70 110Z" fill="#fde68a"/>
-  <path d="M45 212 Q120 152 195 212 L195 240 L45 240 Z" fill="#be185d"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" role="img" aria-label="Itachi Uchiha character">
+  <defs><linearGradient id="g4" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7f1d1d"/><stop offset="1" stop-color="#312e81"/></linearGradient></defs>
+  <circle cx="120" cy="120" r="120" fill="url(#g4)"/>
+  <path d="M45 212 Q120 152 195 212 L195 240 L45 240 Z" fill="#111827"/>
+  <path d="M62 196 Q58 178 76 172 Q84 188 92 176 Q100 190 118 184 Q136 190 144 176 Q152 188 160 172 Q178 178 174 196 L174 240 L62 240 Z" fill="#dc2626" opacity="0.85"/>
+  <path d="M100 178 L140 178 L136 200 L104 200 Z" fill="#f6c89f"/>
   <circle cx="120" cy="125" r="48" fill="#fde8d0"/>
-  <circle cx="102" cy="122" r="5" fill="#111827"/><circle cx="138" cy="122" r="5" fill="#111827"/>
-  <path d="M108 142 Q120 152 132 142" stroke="#111827" stroke-width="4" fill="none" stroke-linecap="round"/>
-  <circle cx="88" cy="138" r="8" fill="#fda4af" opacity="0.6"/><circle cx="152" cy="138" r="8" fill="#fda4af" opacity="0.6"/>
+  <path d="M66 130 Q60 60 120 54 Q180 60 174 130 L168 210 L158 210 L162 120 Q150 84 120 82 Q90 84 78 120 L82 210 L72 210 Z" fill="#111827"/>
+  <rect x="84" y="92" width="72" height="16" rx="4" fill="#6b7280"/>
+  <rect x="106" y="90" width="28" height="20" rx="4" fill="#d1d5db"/>
+  <path d="M112 100 L128 100 M112 100 L120 106 L128 100" stroke="#6b7280" stroke-width="2" fill="none"/>
+  <circle cx="102" cy="126" r="5" fill="#111827"/><circle cx="138" cy="126" r="5" fill="#111827"/>
+  <path d="M96 134 Q100 138 104 134" stroke="#111827" stroke-width="2" fill="none"/>
+  <path d="M136 134 Q140 138 144 134" stroke="#111827" stroke-width="2" fill="none"/>
+  <path d="M108 148 L132 148" stroke="#111827" stroke-width="4" stroke-linecap="round"/>
 </svg>

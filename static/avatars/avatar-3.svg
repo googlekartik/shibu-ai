@@ -1,10 +1,13 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" role="img" aria-label="Zara avatar">
-  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#a855f7"/><stop offset="1" stop-color="#ec4899"/></linearGradient></defs>
-  <circle cx="120" cy="120" r="120" fill="url(#g)"/>
-  <circle cx="72" cy="92" r="22" fill="#b45309"/><circle cx="102" cy="68" r="22" fill="#b45309"/><circle cx="140" cy="68" r="22" fill="#b45309"/><circle cx="168" cy="92" r="22" fill="#b45309"/>
-  <path d="M45 212 Q120 152 195 212 L195 240 L45 240 Z" fill="#581c87"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" role="img" aria-label="Satoru Gojo character">
+  <defs><linearGradient id="g3" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#38bdf8"/><stop offset="1" stop-color="#1d4ed8"/></linearGradient></defs>
+  <circle cx="120" cy="120" r="120" fill="url(#g3)"/>
+  <path d="M45 212 Q120 152 195 212 L195 240 L45 240 Z" fill="#111827"/>
+  <path d="M96 168 L144 168 L144 204 L96 204 Z" fill="#1f2937"/>
+  <path d="M100 178 L140 178 L136 200 L104 200 Z" fill="#f6c89f"/>
   <circle cx="120" cy="125" r="48" fill="#fde8d0"/>
-  <circle cx="102" cy="122" r="5" fill="#111827"/><circle cx="138" cy="122" r="5" fill="#111827"/>
-  <path d="M108 142 Q120 152 132 142" stroke="#111827" stroke-width="4" fill="none" stroke-linecap="round"/>
-  <circle cx="88" cy="138" r="8" fill="#fbbf24" opacity="0.5"/><circle cx="152" cy="138" r="8" fill="#fbbf24" opacity="0.5"/>
+  <path d="M72 116 L80 74 L92 96 L104 58 L116 92 L128 56 L138 94 L152 72 L160 104 L168 118 Q160 88 120 80 Q80 88 72 116Z" fill="#f8fafc"/>
+  <rect x="70" y="112" width="100" height="18" rx="9" fill="#111827"/>
+  <path d="M164 118 L180 112 L176 124 L164 126Z" fill="#111827"/>
+  <path d="M104 144 Q120 154 136 144" stroke="#111827" stroke-width="4" fill="none" stroke-linecap="round"/>
+  <circle cx="88" cy="140" r="8" fill="#fda4af" opacity="0.55"/><circle cx="152" cy="140" r="8" fill="#fda4af" opacity="0.55"/>
 </svg>

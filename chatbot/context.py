@@ -70,6 +70,11 @@ class ConversationContext:
         self.display_name = ""
         self.memories = []
         self.restored_from_sqlite = False
+        # Selected character persona for this session (e.g. "Monkey D.
+        # Luffy"), set by app.py from the logged-in profile. Empty for
+        # anonymous users. Used only for identity wording and the LLM
+        # system prompt — never for a backend/provider claim.
+        self.character_name = ""
 
     def remember(self, fact: str) -> bool:
         """Store one explicit memory. False when empty/duplicate/too long."""
@@ -183,9 +188,11 @@ class ConversationContext:
         # me". Memories are removed only via "forget ...".
         memories = list(self.memories)
         display_name = self.display_name
+        character_name = self.character_name
         self.__init__()
         self.memories = memories
         self.display_name = display_name
+        self.character_name = character_name
 
     def to_dict(self):
         return {

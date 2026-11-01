@@ -4,7 +4,7 @@ body { margin:0; background:#000; color:#f5f5f5;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
   min-height:100vh; display:flex; flex-direction:column; }
 .topbar { display:flex; justify-content:space-between; align-items:center;
-  max-width:760px; width:100%; margin:0 auto; padding:18px 20px 10px; }
+  max-width:1400px; width:100%; margin:0 auto; padding:18px 20px 10px; }
 .brand { font-weight:700; font-size:18px; display:flex; align-items:center; gap:10px; }
 .avatar { width:42px; height:42px; border-radius:50%; object-fit:cover; border:2px solid #7c5cff; }
 .history-title { margin:0 0 4px; font-size:16px; }
@@ -24,8 +24,8 @@ body { margin:0; background:#000; color:#f5f5f5;
   flex:1; display:flex; flex-direction:column; }
 .messages { flex:1; display:flex; flex-direction:column; gap:22px; overflow-y:auto; padding:10px 0 20px; }
 .msg { line-height:1.65; font-size:16px; white-space:pre-wrap; max-width:100%; }
-.msg.user { align-self:flex-end; background:#232323; padding:11px 16px; border-radius:20px; max-width:85%; }
-.msg.bot { align-self:flex-start; }
+.msg.user { align-self:flex-end; background:#2563eb; color:#fff; padding:11px 16px; border-radius:20px; max-width:85%; }
+.msg.bot { align-self:flex-start; background:#262626; padding:12px 16px; border-radius:20px; max-width:88%; }
 .msg .meta { display:block; font-size:12px; color:#777; margin-top:8px; }
 .msg .tools { margin-top:8px; display:flex; gap:14px; }
 .msg .tools button, .msg .tools a { background:none; border:none; color:#888; cursor:pointer; font-size:13px; padding:0; text-decoration:none; }
@@ -42,15 +42,15 @@ a.source-item { color:#b7a7ff; }
   font:inherit; font-size:16px; resize:none; outline:none; padding:8px 0; max-height:140px; }
 .composer textarea::placeholder { color:#777; }
 #attachBtn { width:38px; height:38px; flex:none; border-radius:50%; border:none;
-  background:transparent; color:#888; font-size:18px; cursor:pointer; line-height:1; }
+  background:transparent; color:#a0a0a0; font-size:26px; cursor:pointer; line-height:1; }
 #attachBtn:hover { color:#fff; }
 #micBtn { width:38px; height:38px; flex:none; border-radius:50%; border:none;
   background:transparent; color:#888; font-size:18px; cursor:pointer; line-height:1; }
 #micBtn:hover { color:#fff; }
 #micBtn.listening { color:#ff5c5c; }
 #sendBtn { width:38px; height:38px; flex:none; border-radius:50%; border:none;
-  background:#7c5cff; color:#fff; font-size:20px; cursor:pointer; line-height:1; }
-#sendBtn:hover { background:#8f76ff; }
+  background:#2563eb; color:#fff; font-size:20px; cursor:pointer; line-height:1; }
+#sendBtn:hover { background:#3b82f6; }
 .footnote { text-align:center; color:#666; font-size:12px; margin:12px 0 0; }
 .announcement { max-width:760px; width:100%; margin:10px auto 0; padding:10px 16px;
   background:#141414; border:1px solid #7c5cff; border-radius:12px;
@@ -70,7 +70,47 @@ a.source-item { color:#b7a7ff; }
 .env-table th { color:#a0a0a0; }
 /* Onboarding layout: sidebar is visible on wide screens, collapsible
    everywhere, so the default chat stays clean and centred. */
-.layout { display:flex; max-width:1100px; width:100%; margin:0 auto; flex:1; }
+.layout { display:flex; flex:1; min-width:0; margin:0 auto; }
+/* Muse-style shell: slim icon rail on the left, chat in the centre,
+   character panel on the right (wide screens only). */
+.app-shell { display:flex; max-width:1400px; width:100%; margin:0 auto; flex:1; min-height:0; }
+.rail { width:64px; flex:none; display:flex; flex-direction:column; gap:6px;
+  align-items:center; padding:12px 6px; border-right:1px solid #1a1a1a; }
+.rail-btn { display:flex; flex-direction:column; align-items:center; gap:3px;
+  width:52px; padding:8px 2px; background:none; border:none; border-radius:12px;
+  color:#a0a0a0; cursor:pointer; font:inherit; font-size:11px; text-decoration:none; }
+.rail-btn:hover { background:#1a1a1a; color:#fff; }
+.rail-icon { font-size:20px; line-height:1; }
+.rail-label { font-size:11px; }
+.character-panel { width:300px; flex:none; padding:10px 20px 24px 10px; }
+.panel-inner { background:#141414; border:1px solid #262626; border-radius:14px;
+  padding:20px 16px; position:sticky; top:10px; text-align:center; }
+.panel-avatar { width:96px; height:96px; border-radius:50%; object-fit:cover;
+  border:3px solid #7c5cff; }
+.panel-name { font-weight:700; font-size:18px; margin-top:10px; }
+.panel-status { margin-top:4px; }
+.panel-heading { text-align:left; margin-top:20px; }
+/* Fenced code blocks rendered from plain-text answers (see app.js).
+   Text is always set via textContent, never innerHTML. */
+.code-block { background:#141414; border:1px solid #333; border-radius:12px;
+  margin:8px 0; overflow:hidden; }
+.code-block pre { margin:0; padding:12px 14px; overflow-x:auto; font-size:14px; }
+.code-block pre code { white-space:pre; }
+.code-head { display:flex; justify-content:space-between; align-items:center;
+  padding:7px 12px; border-bottom:1px solid #262626; background:#1a1a1a;
+  font-size:12px; color:#a0a0a0; }
+.code-copy-btn { background:none; border:1px solid #333; color:#d8d8d8;
+  border-radius:8px; padding:4px 10px; cursor:pointer; font-size:12px; }
+.code-copy-btn:hover { border-color:#7c5cff; color:#fff; }
+/* In-chat character choice cards (onboarding need_avatar stage). */
+.character-cards { display:grid; grid-template-columns:repeat(auto-fit, minmax(120px, 1fr));
+  gap:10px; margin-top:10px; }
+.character-card { background:#1a1a1a; border:2px solid #333; border-radius:14px;
+  padding:12px 8px; cursor:pointer; text-align:center; color:#f5f5f5; font:inherit; }
+.character-card:hover { border-color:#7c5cff; }
+.character-card img { width:72px; height:72px; border-radius:50%; object-fit:cover; }
+.character-card .character-card-name { font-weight:700; margin-top:8px; font-size:14px; }
+.character-card .character-card-style { font-size:12px; color:#a0a0a0; margin-top:2px; }
 .main-col { flex:1; min-width:0; display:flex; flex-direction:column; }
 .sidebar { width:260px; flex:none; padding:10px 10px 24px 20px; }
 .sidebar-inner { background:#141414; border:1px solid #262626; border-radius:14px; padding:14px; position:sticky; top:10px; }
@@ -79,10 +119,18 @@ a.source-item { color:#b7a7ff; }
 .quick-actions button { background:#1a1a1a; border:1px solid #333; color:#f5f5f5; border-radius:20px;
   padding:7px 13px; cursor:pointer; font-size:13px; }
 .quick-actions button:hover { border-color:#7c5cff; }
+@media (max-width: 1100px) {
+  .character-panel { display:none; }
+}
 @media (max-width: 900px) {
   .layout { flex-direction:column; }
   .sidebar { width:100%; padding:0 14px 10px; }
   .sidebar-inner { position:static; }
+}
+@media (max-width: 700px) {
+  .rail { display:none; }
+  .msg.bot { max-width:100%; }
+  .msg.user { max-width:92%; }
 }
 .pres-heading { font-size:19px; margin:14px 0 6px; }
 .msg.bot h4.pres-heading { font-size:16px; margin:12px 0 4px; }

@@ -46,6 +46,20 @@ async function renderHistory() {
     li.onclick = () => { sendMessage(q); };
     list.appendChild(li);
   });
+  // Right character panel reuses the same recent-chat data — no
+  // invented entries, and the same click-to-ask behaviour.
+  const panelList = document.getElementById("panelHistoryList");
+  const panelEmpty = document.getElementById("panelHistoryEmpty");
+  if (panelList) {
+    panelList.innerHTML = "";
+    if (panelEmpty) panelEmpty.style.display = unique.length ? "none" : "block";
+    unique.forEach(q => {
+      const li = document.createElement("li");
+      li.textContent = q;
+      li.onclick = () => { sendMessage(q); };
+      panelList.appendChild(li);
+    });
+  }
 }
 
 // Structured presentation blocks (from the content-processing
@@ -203,6 +217,74 @@ function renderBlocks(blocks, container) {
   });
 }
 
+function copyTextWithFallback(text, button) {
+  const done = () => {
+    if (!button) return;
+    const label = button.textContent;
+    button.textContent = "Copied!";
+    setTimeout(() => { button.textContent = label; }, 1500);
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
+  } else {
+    fallbackCopy(text, done);
+  }
+}
+
+function fallbackCopy(text, done) {
+  try {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    document.execCommand("copy");
+    document.body.removeChild(area);
+  } catch (e) { /* clipboard unavailable; button simply does nothing */ }
+  if (done) done();
+}
+
+// Fenced code blocks in plain-text answers: ```lang ... ``` renders
+// as a labelled block with a Copy button. All text is set via
+// textContent, never innerHTML, so model/user text cannot inject
+// markup. An unclosed fence renders to the end of the message.
+function renderCodeBlocks(container, text) {
+  const fenceRe = /```([A-Za-z0-9_+-]*)\n?([\s\S]*?)(?:```|$)/g;
+  let last = 0;
+  let match;
+  let found = false;
+  while ((match = fenceRe.exec(text)) !== null) {
+    found = true;
+    if (match.index > last) container.appendChild(el("div", "", text.slice(last, match.index)));
+    const lang = (match[1] || "").trim() || "code";
+    const codeText = match[2].replace(/\n$/, "");
+    const block = document.createElement("div");
+    block.className = "code-block";
+    const head = document.createElement("div");
+    head.className = "code-head";
+    head.appendChild(el("span", "", lang));
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "code-copy-btn";
+    copy.textContent = "Copy";
+    copy.onclick = () => copyTextWithFallback(codeText, copy);
+    head.appendChild(copy);
+    block.appendChild(head);
+    const pre = document.createElement("pre");
+    pre.appendChild(el("code", "", codeText));
+    block.appendChild(pre);
+    container.appendChild(block);
+    last = match.index + match[0].length;
+    if (match[0].indexOf("```", 3) === -1 && last >= text.length) break;
+  }
+  if (!found) {
+    container.textContent = text;
+  } else if (last < text.length) {
+    container.appendChild(el("div", "", text.slice(last)));
+  }
+}
+
 function addMessage(text, role, extra, saveHistory = true) {
   if (saveHistory) saveToHistory(text, role);
   const div = document.createElement("div");
@@ -215,7 +297,7 @@ function addMessage(text, role, extra, saveHistory = true) {
       body.appendChild(el("div", "pres-verification", "Checked against sources: " + presentation.verification.summary));
     }
   } else {
-    body.textContent = text;
+    renderCodeBlocks(body, text);
   }
   div.appendChild(body);
   // AI Environment Properties: rendered as a separate table below the
@@ -323,6 +405,7 @@ async function sendMessage(text) {
     if (!res.ok) { addMessage("Error: " + (data.error || "Something went wrong."), "bot"); return; }
     addMessage(data.response, "bot", data);
     updateExplainability(data);
+    if (data.needs_avatar) showCharacterCards(data.avatars);
     if (sidebarEl && !sidebarEl.classList.contains("hidden")) renderHistory();
   } catch (e) {
     typingEl.classList.add("hidden");
@@ -365,6 +448,78 @@ inputEl.addEventListener("input", () => {
 });
 // Google login state in the header: Sign in -> /login page, or
 // display name + Log out when already signed in. Chat works either way.
+// Right character panel: shows the selected character (or the
+// default Shibu AI card when signed out) and a Connected status
+// once the server has answered /api/me. No invented data.
+async function updateCharacterPanel(me) {
+  const img = document.getElementById("panelAvatar");
+  const nameEl = document.getElementById("panelName");
+  const statusEl = document.getElementById("panelStatus");
+  if (!img || !nameEl || !statusEl) return;
+  if (!me || !me.logged_in) {
+    img.src = "/static/shibu.png";
+    nameEl.textContent = "Shibu AI";
+    statusEl.textContent = "Not signed in";
+    return;
+  }
+  img.src = me.avatar_url || "/static/shibu.png";
+  nameEl.textContent = me.character_name || "Shibu AI";
+  statusEl.textContent = "Connected";
+}
+
+// In-chat character choice (onboarding need_avatar stage): five
+// clickable cards from GET /api/avatars. Choosing one saves it via
+// POST /api/profile/avatar and continues the welcome flow in chat,
+// with no page reload. The /avatar page remains for changing the
+// character later; returning users never see these cards.
+let characterCardsShown = false;
+async function showCharacterCards(avatars) {
+  if (characterCardsShown) return;
+  characterCardsShown = true;
+  let list = avatars;
+  if (!Array.isArray(list)) {
+    try {
+      const res = await fetch("/api/avatars");
+      const data = await res.json();
+      list = data.avatars || [];
+    } catch (e) { list = []; }
+  }
+  if (!list.length) { characterCardsShown = false; return; }
+  const div = document.createElement("div");
+  div.className = "msg bot";
+  div.appendChild(el("div", "", "Choose your character to continue."));
+  const grid = document.createElement("div");
+  grid.className = "character-cards";
+  list.forEach(a => {
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "character-card";
+    const img = document.createElement("img");
+    img.src = "/static/" + a.file;
+    img.alt = a.name + " character";
+    card.appendChild(img);
+    card.appendChild(el("div", "character-card-name", a.name));
+    card.appendChild(el("div", "character-card-style", a.style || ""));
+    card.onclick = async () => {
+      try {
+        const res = await fetch("/api/profile/avatar", { method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ avatar_id: a.id }) });
+        if (!res.ok) return;
+        div.remove();
+        characterCardsShown = false;
+        await refreshLoginState();
+        await showWelcomeIfNeeded();
+        inputEl.focus();
+      } catch (e) { /* card stays; the user can try again */ }
+    };
+    grid.appendChild(card);
+  });
+  div.appendChild(grid);
+  messagesEl.appendChild(div);
+  scrollDown();
+}
+
 async function refreshLoginState() {
   const loginBtn = document.getElementById("loginBtn");
   const logoutBtn = document.getElementById("logoutBtn");
@@ -384,12 +539,15 @@ async function refreshLoginState() {
         avatarImg.src = me.avatar_url || "/static/shibu.png";
         avatarLink.classList.remove("hidden");
       }
-      if (me.onboarding_stage === "need_avatar") { window.location.href = "/avatar"; return; }
+      // need_avatar is handled in chat with character cards (see
+      // showCharacterCards) — no redirect to /avatar on load.
+      await updateCharacterPanel(me);
     } else {
       loginBtn.classList.remove("hidden");
       logoutBtn.classList.add("hidden");
       userLabel.classList.add("hidden");
       if (avatarLink) avatarLink.classList.add("hidden");
+      await updateCharacterPanel(null);
     }
   } catch (e) { /* header stays on Sign in; chat still works */ }
 }
@@ -420,6 +578,15 @@ const sidebarEl = document.getElementById("sidebar");
 document.getElementById("sidebarBtn").onclick = () => {
   if (sidebarEl) { sidebarEl.classList.toggle("hidden"); if (!sidebarEl.classList.contains("hidden")) renderHistory(); }
 };
+// Left icon rail: every button does something real. Chat focuses the
+// composer, Chats toggles the same sidebar as the header button,
+// Upload opens the same file picker as the composer button, and
+// Character is a plain link to /avatar.
+document.getElementById("railChat").onclick = () => inputEl.focus();
+document.getElementById("railHistory").onclick = () => {
+  if (sidebarEl) { sidebarEl.classList.toggle("hidden"); if (!sidebarEl.classList.contains("hidden")) renderHistory(); }
+};
+document.getElementById("railUpload").onclick = () => document.getElementById("fileInput").click();
 document.getElementById("newChatBtn").onclick = async () => {
   await fetch("/api/clear", { method: "POST" });
   messagesEl.innerHTML = "";
@@ -473,6 +640,9 @@ if (!SpeechRec) {
     if (data.needs_welcome && data.welcome_message) {
       addMessage(data.welcome_message, "bot", null, false);
       welcomed = true;
+    }
+    if (data.needs_avatar) {
+      await showCharacterCards();
     }
   } catch (e) {}
   if (!restored && !welcomed) addMessage("Hello! I'm Shibu AI. How can I help you today?", "bot");

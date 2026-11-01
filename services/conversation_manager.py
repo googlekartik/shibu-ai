@@ -63,6 +63,10 @@ def context_system_lines(context):
     name = getattr(context, "display_name", "") or ""
     if name:
         lines.append(f"The user's preferred name is {name}. Use it naturally when greeting them.")
+    character = getattr(context, "character_name", "") or ""
+    if character:
+        lines.append(f"You are Shibu AI, answering as its selected character, {character}. "
+                     "Never claim to be Muse, Meta AI, or any other assistant, and never claim to be human.")
     prefs = getattr(context, "preferences", {}) or {}
     tone, level = prefs.get("tone"), prefs.get("level")
     if tone in ("simple", "concise", "detailed"):

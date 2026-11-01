@@ -1,10 +1,16 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" role="img" aria-label="Nia avatar">
-  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0d9488"/><stop offset="1" stop-color="#f59e0b"/></linearGradient></defs>
-  <circle cx="120" cy="120" r="120" fill="url(#g)"/>
-  <path d="M78 170 Q70 100 90 78 M108 172 Q104 95 120 78 M132 172 Q136 95 120 78 M162 170 Q170 100 150 78" stroke="#111827" stroke-width="14" fill="none" stroke-linecap="round"/>
-  <path d="M45 212 Q120 152 195 212 L195 240 L45 240 Z" fill="#134e4a"/>
-  <circle cx="120" cy="125" r="48" fill="#8d5a2b"/>
-  <circle cx="102" cy="122" r="5" fill="#111827"/><circle cx="138" cy="122" r="5" fill="#111827"/>
-  <path d="M108 142 Q120 152 132 142" stroke="#111827" stroke-width="4" fill="none" stroke-linecap="round"/>
-  <circle cx="88" cy="138" r="8" fill="#fbbf24" opacity="0.5"/><circle cx="152" cy="138" r="8" fill="#fbbf24" opacity="0.5"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" role="img" aria-label="Eren Yeager character">
+  <defs><linearGradient id="g5" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0d9488"/><stop offset="1" stop-color="#14532d"/></linearGradient></defs>
+  <circle cx="120" cy="120" r="120" fill="url(#g5)"/>
+  <path d="M45 212 Q120 152 195 212 L195 240 L45 240 Z" fill="#5b5346"/>
+  <path d="M106 168 L134 168 L134 196 L106 196 Z" fill="#d6cdbf"/>
+  <path d="M100 178 L140 178 L136 200 L104 200 Z" fill="#f6c89f"/>
+  <circle cx="120" cy="125" r="48" fill="#fde8d0"/>
+  <path d="M70 122 Q64 58 120 54 Q176 58 170 122 Q166 96 154 86 Q146 98 140 84 Q124 68 100 78 Q82 86 76 106 Q70 110 70 122Z" fill="#6b4423"/>
+  <path d="M74 118 Q78 140 74 156 L70 118Z" fill="#6b4423"/>
+  <path d="M166 118 Q162 140 166 156 L170 118Z" fill="#6b4423"/>
+  <circle cx="102" cy="122" r="5" fill="#166534"/><circle cx="138" cy="122" r="5" fill="#166534"/>
+  <path d="M94 112 L108 115" stroke="#6b4423" stroke-width="4" stroke-linecap="round"/>
+  <path d="M132 115 L146 112" stroke="#6b4423" stroke-width="4" stroke-linecap="round"/>
+  <path d="M108 146 L132 146" stroke="#111827" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="88" cy="138" r="7" fill="#fda4af" opacity="0.5"/><circle cx="152" cy="138" r="7" fill="#fda4af" opacity="0.5"/>
 </svg>

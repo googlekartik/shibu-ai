@@ -124,6 +124,13 @@ class ModelManager:
     """One place for: select -> (download once) -> load -> generate.
 
     Modes, decided at construction from the environment:
+    - "meta":   META_API_KEY and META_MODEL are both set (opt-in only;
+              no default model). An OpenAI-compatible chat-completions
+              call to META_API_BASE (default https://api.meta.ai/v1).
+              Live use is UNVERIFIED — no key was available to test
+              with. When set, it is tried before OpenAI/HF; on failure
+              the HF router is tried as a second chance when a token
+              is also configured, mirroring the OpenAI mode.
     - "openai": OPENAI_API_KEY is set. ChatGPT API (gpt-4o-mini by
               default) — the fastest, most reliable hosted option, and
               the one used first when both OpenAI and HF keys are set.
@@ -140,6 +147,12 @@ class ModelManager:
     def __init__(self, token=None, model=None, use_local=None, openai_key=None):
         self.openai_key = (openai_key if openai_key is not None else os.environ.get("OPENAI_API_KEY", "")).strip()
         self.openai_model = (os.environ.get("OPENAI_MODEL", "").strip() or "gpt-4o-mini")
+        # Opt-in Meta-compatible provider: only when BOTH key and model
+        # are set. No default model is ever invented.
+        self.meta_key = os.environ.get("META_API_KEY", "").strip()
+        self.meta_model = os.environ.get("META_MODEL", "").strip()
+        self.meta_base = os.environ.get("META_API_BASE", "").strip() or "https://api.meta.ai/v1"
+        self.meta_enabled = bool(self.meta_key and self.meta_model)
         self.token = (token if token is not None else os.environ.get("HF_TOKEN", "")).strip()
         self.cloud_only = os.environ.get("CLOUD_ONLY", "").strip().lower() in ("1", "true", "yes")
         requested_local = (use_local if use_local is not None
@@ -156,7 +169,11 @@ class ModelManager:
         self.provider = os.environ.get("HF_PROVIDER", "").strip()
         self.effective_model = None
         env_model = (model or os.environ.get("HF_MODEL", "")).strip()
-        if self.openai_key and not self.force_local:
+        if self.meta_enabled and not self.force_local:
+            self.mode = "meta"
+            self.model_id = self.meta_model
+            self.effective_model = self.meta_model
+        elif self.openai_key and not self.force_local:
             self.mode = "openai"
             self.model_id = self.openai_model
             self.effective_model = self.openai_model
@@ -187,8 +204,8 @@ class ModelManager:
         info = {
             "mode": self.mode,
             "model": self.model_id,
-            "loaded": self._model is not None or (self.mode == "api" and bool(self.token)) or (self.mode == "openai" and bool(self.openai_key)),
-            "device": self._device if self.mode == "local" else ("api" if self.mode in ("api", "openai") else None),
+            "loaded": self._model is not None or (self.mode == "api" and bool(self.token)) or (self.mode == "openai" and bool(self.openai_key)) or (self.mode == "meta" and self.meta_enabled),
+            "device": self._device if self.mode == "local" else ("api" if self.mode in ("api", "openai", "meta") else None),
             "ram_gb": round(ram, 1) if ram else None,
             "gpu": _has_gpu(),
             "cloud_only": self.cloud_only,
@@ -199,8 +216,9 @@ class ModelManager:
         if self.mode == "off":
             if self.cloud_only:
                 info["how_to_enable"] = (
-                    "This deployment is cloud-only. Set OPENAI_API_KEY for gpt-4o-mini "
-                    "or HF_TOKEN for Hugging Face hosted inference in the service environment.")
+                    "This deployment is cloud-only. Set OPENAI_API_KEY for gpt-4o-mini, "
+                    "HF_TOKEN for Hugging Face hosted inference, or both META_API_KEY and "
+                    "META_MODEL for the opt-in Meta-compatible API, in the service environment.")
             else:
                 info["how_to_enable"] = (
                     "For the fastest answer, set OPENAI_API_KEY in .env (ChatGPT API, gpt-4o-mini). "
@@ -211,6 +229,8 @@ class ModelManager:
 
     def select(self):
         """Report the model that would be used, without downloading it."""
+        if self.mode == "meta":
+            return {"mode": "meta", "model": self.model_id, "note": "Opt-in Meta-compatible chat API (unverified live). No default model; META_MODEL must be set."}
         if self.mode == "openai":
             return {"mode": "openai", "model": self.model_id, "note": "ChatGPT API (OpenAI) — fast, no download, no provider routing."}
         if self.mode == "api":
@@ -229,6 +249,8 @@ class ModelManager:
         Download happens only here, only once (the Hub cache), and only
         when local mode was explicitly enabled.
         """
+        if self.mode == "meta":
+            return True, f"Meta-compatible API mode ready: {self.model_id} (opt-in; live use unverified)."
         if self.mode == "openai":
             return True, f"OpenAI API mode ready: {self.model_id} (ChatGPT API, fast response)."
         if self.mode == "api":
@@ -277,6 +299,20 @@ class ModelManager:
         so callers can fall back to the rule engine instead of showing a
         traceback or an invented answer.
         """
+        if self.mode == "meta":
+            from services.meta_service import MetaService
+            svc = MetaService(api_key=self.meta_key, model=self.model_id, base=self.meta_base)
+            text, err = svc.generate(messages, max_tokens=max_new_tokens, temperature=temperature)
+            if text:
+                self.effective_model = self.model_id
+                return text, err
+            # Second chance, mirroring the OpenAI mode: only when a
+            # Hugging Face token is also configured.
+            if err and self.token:
+                hf_text, _hf_err = self._generate_api(messages, max_new_tokens, temperature)
+                if hf_text:
+                    return hf_text, None
+            return text, err
         if self.mode == "openai":
             from services.openai_service import OpenAIService
             svc = OpenAIService(api_key=self.openai_key, model=self.model_id)

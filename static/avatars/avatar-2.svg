@@ -1,10 +1,17 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" role="img" aria-label="Aria avatar">
-  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#10b981"/><stop offset="1" stop-color="#a3e635"/></linearGradient></defs>
-  <circle cx="120" cy="120" r="120" fill="url(#g)"/>
-  <path d="M48 175 Q55 95 120 88 Q185 95 192 175 Q192 210 175 210 L65 210 Q48 210 48 175Z" fill="#6b3f1d"/>
-  <path d="M45 212 Q120 152 195 212 L195 240 L45 240 Z" fill="#065f46"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" role="img" aria-label="Levi Ackerman character">
+  <defs><linearGradient id="g2" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#475569"/><stop offset="1" stop-color="#1e293b"/></linearGradient></defs>
+  <circle cx="120" cy="120" r="120" fill="url(#g2)"/>
+  <path d="M45 212 Q120 152 195 212 L195 240 L45 240 Z" fill="#4b5b4a"/>
+  <path d="M106 168 L134 168 L134 196 L106 196 Z" fill="#ffffff"/>
+  <path d="M106 168 L120 196 L134 168 L128 160 L112 160 Z" fill="#e2e8f0"/>
+  <path d="M100 178 L140 178 L136 200 L104 200 Z" fill="#f6c89f"/>
   <circle cx="120" cy="125" r="48" fill="#fde8d0"/>
-  <circle cx="102" cy="122" r="5" fill="#111827"/><circle cx="138" cy="122" r="5" fill="#111827"/>
-  <path d="M108 142 Q120 152 132 142" stroke="#111827" stroke-width="4" fill="none" stroke-linecap="round"/>
-  <circle cx="88" cy="138" r="8" fill="#fda4af" opacity="0.6"/><circle cx="152" cy="138" r="8" fill="#fda4af" opacity="0.6"/>
+  <path d="M72 120 Q68 58 120 54 Q172 58 168 120 Q166 96 158 84 Q150 96 146 82 Q130 66 104 76 Q86 84 78 104 Q72 108 72 120Z" fill="#1f2937"/>
+  <path d="M72 118 Q74 132 78 138 L74 118Z" fill="#1f2937"/>
+  <path d="M168 118 Q166 132 162 138 L166 118Z" fill="#1f2937"/>
+  <circle cx="102" cy="122" r="5" fill="#334155"/><circle cx="138" cy="122" r="5" fill="#334155"/>
+  <path d="M96 118 L108 116" stroke="#1f2937" stroke-width="3" stroke-linecap="round"/>
+  <path d="M132 116 L144 118" stroke="#1f2937" stroke-width="3" stroke-linecap="round"/>
+  <path d="M108 146 L132 146" stroke="#111827" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="88" cy="138" r="7" fill="#cbd5e1" opacity="0.4"/><circle cx="152" cy="138" r="7" fill="#cbd5e1" opacity="0.4"/>
 </svg>

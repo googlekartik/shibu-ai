@@ -31,7 +31,7 @@ def test_avatars_are_five_unique_and_files_exist():
 def test_profile_anonymous_and_avatar_requires_login():
     client = app_module.app.test_client()
     assert client.get("/api/profile").get_json()["logged_in"] is False
-    res = client.post("/api/profile/avatar", json={"avatar_id": "maya"})
+    res = client.post("/api/profile/avatar", json={"avatar_id": "avatar-1"})
     assert res.status_code == 401
 
 
@@ -39,22 +39,22 @@ def test_avatar_validation_and_save():
     client = _client_with_login()
     res = client.post("/api/profile/avatar", json={"avatar_id": "nope"})
     assert res.status_code == 400
-    res = client.post("/api/profile/avatar", json={"avatar_id": "zara"})
+    res = client.post("/api/profile/avatar", json={"avatar_id": "avatar-3"})
     assert res.status_code == 200
     data = res.get_json()
-    assert data["avatar_id"] == "zara"
+    assert data["avatar_id"] == "avatar-3"
     assert data["avatar_url"].endswith("avatars/avatar-3.svg")
     # Changing avatar later must not restart onboarding for a
     # completed user: complete it, change avatar, stay completed.
     with client.session_transaction() as sess:
         sess["onboarding_completed"] = True
-    res = client.post("/api/profile/avatar", json={"avatar_id": "luna"})
+    res = client.post("/api/profile/avatar", json={"avatar_id": "avatar-4"})
     assert res.get_json()["onboarding_completed"] is True
 
 
 def test_welcome_flow_ask_name_then_goal_then_normal_chat():
     client = _client_with_login()
-    client.post("/api/profile/avatar", json={"avatar_id": "maya"})
+    client.post("/api/profile/avatar", json={"avatar_id": "avatar-1"})
     status = client.get("/api/onboarding/status").get_json()
     assert status["needs_welcome"] is True
     assert status["welcome_message"] == "Hi! Welcome! What should I call you?"
@@ -78,7 +78,7 @@ def test_returning_user_skips_welcome_and_avatar_page_requires_login():
     assert client.get("/avatar").status_code == 302  # redirect to /login
     logged = _client_with_login()
     with logged.session_transaction() as sess:
-        sess["profile_avatar_id"] = "maya"
+        sess["profile_avatar_id"] = "avatar-1"
         sess["onboarding_completed"] = True
     assert logged.get("/api/onboarding/status").get_json()["needs_welcome"] is False
     # Anonymous chat is untouched by onboarding.
@@ -94,7 +94,7 @@ def test_login_and_avatar_pages_render():
     logged = _client_with_login()
     page = logged.get("/avatar").data
     assert b"Choose your avatar" in page
-    for name in (b"Maya", b"Aria", b"Zara", b"Luna", b"Nia"):
+    for name in (b"Monkey D. Luffy", b"Levi Ackerman", b"Satoru Gojo", b"Itachi Uchiha", b"Eren Yeager"):
         assert name in page
     index = client.get("/").data
     assert b"Conversations" in index
