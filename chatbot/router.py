@@ -9,14 +9,15 @@ Maths / PDF / search are checked before generic rules so that e.g.
 import re
 
 from chatbot.confidence import classify  # noqa: F401  (re-exported for tests)
-from chatbot.patterns import FOLLOWUP_USED_FOR
+from chatbot.patterns import FOLLOWUP_USED_FOR, RULES
 from chatbot.response_manager import format_response
 from chatbot.rule_engine import match_rule
 from services.math_service import MathService, looks_like_math
 from services.pdf_service import PDFService
 from services.web_search_service import WebSearchService
-from services.web_answer import format_web_answer, clean_search_topic
-from services.code_service import generate_code, debug_code, compare as compare_topics
+from services.web_answer import format_web_answer, clean_search_topic, filter_results
+from services.code_service import (generate_code, debug_code, compare as compare_topics,
+                                  detect_code_request, generate_code_for)
 from services.code_runner import run_python_code
 from services.document_service import summarize as summarize_doc, answer_from_document, make_notes as make_doc_notes
 from services.file_generation_service import generate_pptx, generate_docx, generate_xlsx
@@ -27,7 +28,7 @@ from services.environment_analyzer import (
     should_analyze)
 from services.context_memory import (
     apply_math_followup, resolve_followup, resolve_math_followup,
-    resolve_previous_reference)
+    resolve_previous_reference, simplify_sentence)
 from services.response_generator import validate_llm_answer, format_llm_answer
 import os
 from utils.text_processing import normalize_for_matching
@@ -102,6 +103,226 @@ def _first_sentence(text: str) -> str:
     import re as _re
     parts = _re.split(r"(?<=[.!?])\s+", text.strip())
     return parts[0] if parts else text
+
+
+# ------------------------------------------------------------------
+# Explicit-memory recall (D9): a question about a personal fact the
+# user asked Shibu to remember must be answered from the stored
+# memory — never by a generic rule ("my favourite colour is the
+# black background"). Runs before the rule engine.
+# ------------------------------------------------------------------
+_MEMORY_QUESTION_RE = re.compile(
+    r"\bwhat(?:'s| is)\s+my\s+(favourite|favorite)\s+([a-z]+)\b"
+    r"|\bmy\s+(favourite|favorite)\s+([a-z]+)\b.*\?$"
+    r"|\bwhat\s+do\s+you\s+remember\s+about\s+my\s+([a-z ]+?)\s*\?$",
+    re.I)
+
+
+def _memory_recall(text: str, context):
+    """Return an answer for a personal-fact question, or None.
+
+    Stored value wins when a memory mentions the asked fact;
+    otherwise say plainly that it is not remembered — the generic
+    definition rule must not answer a personal question.
+    """
+    m = _MEMORY_QUESTION_RE.search(text or "")
+    if not m:
+        return None
+    asked = " ".join(g for g in m.groups() if g).lower().strip()
+    asked_words = [w for w in re.findall(r"[a-z]+", asked) if w not in ("favourite", "favorite", "my")]
+    memories = list(getattr(context, "memories", None) or [])
+    for fact in memories:
+        low_fact = fact.lower()
+        if any(w in low_fact for w in asked_words) or asked in low_fact:
+            return (f"From what you asked me to remember: {fact}. "
+                    "Say 'Forget that' if you want me to forget it.")
+    label = " ".join(asked_words) or "that"
+    return (f"I haven't saved anything about your {label} yet. "
+            "Say e.g. 'Remember that my favourite colour is blue' and I'll save it.")
+
+
+# ------------------------------------------------------------------
+# Fuzzy fallback (D15): a typo'd topic ("wht is fotosintesis") must
+# still reach its rule. Only applied when no rule matched, with a
+# strict cutoff, so unrelated gibberish still falls back.
+# ------------------------------------------------------------------
+def _fuzzy_correct(text: str):
+    """Return a corrected message, or None when nothing is close.
+
+    Each word is matched against the rule vocabulary (keywords and
+    topics); a word is replaced only by a close match (difflib
+    ratio >= 0.75) that is at least 5 letters long, so a short typo
+    like 'wht' cannot trigger a correction and unrelated gibberish
+    still falls back.
+    """
+    import difflib
+    vocab = set()
+    for rule in RULES:
+        for kw in rule.get("keywords", []) or []:
+            vocab.add(kw.lower())
+        topic = (rule.get("topic") or "").lower()
+        vocab.update(re.findall(r"[a-z]+", topic))
+        for pat in rule.get("patterns", []) or []:
+            vocab.update(w for w in re.findall(r"[a-z]+", pat.lower()) if len(w) >= 5)
+    vocab = {w for w in vocab if len(w) >= 5}
+    words = (text or "").split()
+    changed = False
+    out = []
+    for word in words:
+        core = re.sub(r"[^a-z]", "", word.lower())
+        if core and core not in vocab and len(core) >= 5:
+            matches = difflib.get_close_matches(core, vocab, n=1, cutoff=0.75)
+            if matches:
+                word = word.lower().replace(core, matches[0])
+                changed = True
+        out.append(word)
+    if not changed:
+        return None
+    return " ".join(out)
+
+
+# ------------------------------------------------------------------
+# Fun facts bank (D17): small curated facts, one topic per entry.
+# Used for "give N fun facts" and multi-part instructions. Facts are
+# about the named topic only — never invented from other content.
+# ------------------------------------------------------------------
+FUN_FACTS = {
+    "black holes": [
+        "A black hole's gravity is so strong that not even light can escape once it crosses the edge, called the event horizon.",
+        "Time runs slower near a black hole than far away from it, an effect predicted by Einstein's theory of relativity.",
+        "The black hole at the centre of our Milky Way galaxy, Sagittarius A*, weighs about 4 million times as much as the Sun.",
+        "Black holes can form when a very massive star runs out of fuel and collapses under its own gravity.",
+        "Some black holes spin so fast that they drag the space around them along, an effect called frame-dragging.",
+    ],
+    "photosynthesis": [
+        "Photosynthesis is how green plants make food using sunlight, water and carbon dioxide.",
+        "A by-product of photosynthesis is oxygen, which is the gas most living things breathe.",
+        "The green colour of leaves comes from chlorophyll, the pigment that captures sunlight for photosynthesis.",
+        "Photosynthesis in ocean plankton produces a large share of the oxygen in Earth's air.",
+    ],
+    "machine learning": [
+        "Machine learning systems learn patterns from data instead of following only fixed rules written by a programmer.",
+        "Spam filters use machine learning to learn which messages look like spam from examples.",
+        "Machine learning improves with more good data, much like practice improves a skill.",
+        "Recommendation systems use machine learning to guess what you might like next from what you watched or bought before.",
+    ],
+}
+
+
+def _previous_fact_topic(context) -> str:
+    """The topic a bare 'give me N fun facts' refers to.
+
+    The previous question's own words win over the stored topic
+    label: the photosynthesis rule's topic label is 'biology', but
+    'give me 2 fun facts' after asking about photosynthesis must
+    give photosynthesis facts. Falls back to the stored topic.
+    """
+    last_user = (getattr(context, "last_user_message", "") or "").lower()
+    words = re.findall(r"[a-z]+", last_user)
+    for word in words:
+        if word in FUN_FACTS:
+            return word
+    for word in words:
+        if len(word) >= 4 and match_rule(word)["intent"] != "UNKNOWN":
+            return word
+    return (getattr(context, "last_topic", "") or "").strip()
+
+
+def _fun_facts_answer(topic: str, count: int) -> str:
+    """N facts about the topic, from the curated bank when it has
+    the topic, else from the rule answer's own sentences (which are
+    about the topic by construction)."""
+    topic_key = (topic or "").strip().lower()
+    facts = FUN_FACTS.get(topic_key)
+    if facts:
+        picked = facts[:max(1, count)]
+        lines = [f"Fun fact {i + 1}: {f}" for i, f in enumerate(picked)]
+        return "\n".join(lines)
+    rule = match_rule(topic_key)
+    if rule["intent"] == "UNKNOWN":
+        return ""
+    sents = re.split(r"(?<=[.!?])\s+", rule["response"].strip())
+    picked = [s.strip() for s in sents if s.strip()][:max(1, count)]
+    return "\n".join(f"Fun fact {i + 1}: {s}" for i, s in enumerate(picked))
+
+
+def _multipart_instruction(text: str, context, processing_ms=0.0):
+    """Parse 'explain <topic> to a 10 year old, then give N fun
+    facts, then ask me one question about it'.
+
+    Returns a payload dict or None. All three parts are built from
+    the topic's own rule answer and the facts bank — the word
+    'give' never reaches the dictionary/web fallback.
+    """
+    low = (text or "").lower()
+    m = re.search(r"explain\s+(.+?)\s+to\s+a\s+10\s+year\s+old", low)
+    if not m:
+        return None
+    if "fun fact" not in low or "question" not in low:
+        return None
+    topic = m.group(1).strip().strip(" ,")
+    if not topic:
+        return None
+    n_match = re.search(r"give\s+(\d+)\s+fun facts?", low)
+    n = int(n_match.group(1)) if n_match else 3
+    rule = match_rule(topic)
+    if rule["intent"] == "UNKNOWN":
+        return None
+    first = _first_sentence(rule["response"])
+    explanation = simplify_sentence(first)
+    facts = _fun_facts_answer(topic, n)
+    if not facts:
+        return None
+    question = f"Here is one question for you: can you tell me one thing you learned about {topic}?"
+    answer = (f"{explanation}\n\n{facts}\n\n{question}")
+    payload = format_response(text=answer, intent="MULTI_PART_EXPLAIN",
+        rule_id="multipart_explain", confidence=0.90,
+        tool="Rule engine + fun facts", action="Explain simply, give fun facts, ask a question",
+        processing_ms=processing_ms)
+    context.add_exchange(text, answer, "MULTI_PART_EXPLAIN", "multipart_explain", 0.90,
+                         topic=rule.get("topic", topic))
+    return payload
+
+
+def _comparison_quiz_answer(a: str, b: str, context) -> str | None:
+    """Build a quiz about a comparison from its own rows/facts.
+
+    Hand-written questions win; otherwise the comparison prose
+    supplies one question per entity. Returns None when the pair
+    has no comparison content at all (caller falls through).
+    """
+    from services.code_service import COMPARISONS, COMPARISON_QUIZZES, _normalise_compare_name
+    key = (_normalise_compare_name(a), _normalise_compare_name(b))
+    rev = (key[1], key[0])
+    pair = key if key in COMPARISON_QUIZZES or key in COMPARISONS else rev
+    questions = COMPARISON_QUIZZES.get(pair)
+    if questions:
+        lines = ["Quiz on the comparison:"]
+        for i, q in enumerate(questions, 1):
+            lines.append(f"{i}. {q['question']}")
+            for opt in q["options"]:
+                lines.append(f"   - {opt}")
+            lines.append(f"   Answer: {q['answer']}")
+        return "\n".join(lines)
+    prose = COMPARISONS.get(pair)
+    if not prose:
+        return None
+    a_name, b_name = pair
+    sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", prose) if s.strip()]
+    a_sents = [s for s in sents if a_name in s.lower()]
+    b_sents = [s for s in sents if b_name in s.lower()]
+    if not a_sents or not b_sents:
+        return None
+    lines = ["Quiz on the comparison:",
+             f"1. Which of these is true of {a_name.title()}?",
+             f"   - {a_sents[0]}",
+             f"   - {b_sents[0]}",
+             f"   Answer: {a_sents[0]}",
+             f"2. Which of these is true of {b_name.title()}?",
+             f"   - {b_sents[0]}",
+             f"   - {a_sents[0]}",
+             f"   Answer: {b_sents[0]}"]
+    return "\n".join(lines)
 
 
 def _adapt_to_preferences(text: str, context) -> str:
@@ -260,7 +481,7 @@ def _web_fallback_answer(text: str, context, processing_ms=0.0):
     topic = clean_search_topic(text)
     if not topic:
         return None
-    results = search_service.search(topic)
+    results = filter_results(topic, search_service.search(topic))
     if not results:
         return None
     payload = format_response(
@@ -437,7 +658,7 @@ def process_single_message(message: str, context, processing_ms=0.0, web_search_
     # 4) Web search — phrased as an answer, with sources, not a raw list
     if _is_search_request(low):
         query = _search_query_from(text)
-        results = search_service.search(query)
+        results = filter_results(query, search_service.search(query))
         if results:
             payload = format_response(
                 text=_phrase_search_results(query, results),
@@ -532,6 +753,18 @@ def process_single_message(message: str, context, processing_ms=0.0, web_search_
         context.add_exchange(text, payload["response"], "MEMORY", _rid, 0.95)
         return payload
 
+    # 5b3) Explicit-memory recall: a question about a personal fact
+    # the user asked Shibu to remember is answered from the stored
+    # memory — or plainly "not remembered" when nothing is stored.
+    # A generic rule (e.g. the bot's own favourite colour) must
+    # never answer a personal question.
+    _recall = _memory_recall(text, context)
+    if _recall is not None:
+        payload = format_response(text=_recall, intent="MEMORY", rule_id="memory_recall", confidence=0.95,
+            tool="Memory", action="Recall explicit memory", processing_ms=processing_ms)
+        context.add_exchange(text, payload["response"], "MEMORY", "memory_recall", 0.95)
+        return payload
+
     # 5c) Clarifying questions for vague input (do not guess)
     if norm in VAGUE_INPUTS or (len(norm) <= 2 and norm not in ("hi",)):
         payload = format_response(text="I want to get this right instead of guessing — could you tell me a little more? For example, what topic is this about, and what do you want me to do with it (explain it, calculate it, search for it, or make a file from it)?",
@@ -551,12 +784,37 @@ def process_single_message(message: str, context, processing_ms=0.0, web_search_
             context.add_exchange(text, payload["response"], "MATHEMATICS_STEP_BY_STEP", "math_steps", 0.99)
             return payload
 
+    # 5d2) "Give me N fun facts (about <topic>)" — facts about the
+    # topic from the curated bank or the topic's own rule answer.
+    # The word "give" must never reach the dictionary/web fallback.
+    _ff = re.search(r"\bgive\s+(?:me\s+)?(\d+)\s+fun facts?(?:\s+about\s+(.+))?", low)
+    if _ff:
+        _ff_topic = (_ff.group(2) or "").strip().rstrip(".")
+        if not _ff_topic:
+            _ff_topic = _previous_fact_topic(context)
+        if _ff_topic:
+            _ff_text = _fun_facts_answer(_ff_topic, int(_ff.group(1)))
+            if _ff_text:
+                payload = format_response(text=_ff_text, intent="FUN_FACTS", rule_id="fun_facts",
+                    confidence=0.90, tool="Fun facts bank", action="Give fun facts",
+                    processing_ms=processing_ms)
+                context.add_exchange(text, payload["response"], "FUN_FACTS", "fun_facts", 0.90,
+                                     topic=_ff_topic)
+                return payload
+
     # 5e) Code generation, debugging, comparison
-    if re.search(r"write (python )?code (to|for)", low) or low.startswith("code for") or low.startswith("code to"):
-        code, expl = generate_code(text)
-        if code:
-            payload = format_response(text=f"{expl}\n\n```python\n{code}\n```",
+    if (re.search(r"write (python |javascript |js )?code (to|for)", low) or low.startswith("code for")
+            or low.startswith("code to")
+            or re.search(r"write the same|same (code )?in (javascript|python|\bjs\b)|write (it|that) in (javascript|python|\bjs\b)", low)):
+        _code_req = detect_code_request(text, getattr(context, "last_code_task", None))
+        if _code_req is not None:
+            _task, _lang = _code_req
+            code, expl = generate_code_for(_task, _lang)
+            _fence = "javascript" if _lang == "javascript" else "python"
+            payload = format_response(text=f"{expl}\n\n```{_fence}\n{code}\n```",
                 intent="CODE_GENERATION", rule_id="code_template", confidence=0.90, tool="Code templates", action="Generate code", processing_ms=processing_ms)
+            context.last_code_task = _task
+            context.last_code_language = _lang
         else:
             payload = format_response(text="I don't have a ready template for that code yet, so I won't guess one. I can generate code for: factorial, fibonacci, reverse string, sort, prime check, even/odd, and palindrome. Try e.g. 'Write Python code for factorial'.",
                 intent="CODE_GENERATION", rule_id="code_template", confidence=0.40, tool="Code templates", action="Code template not found", processing_ms=processing_ms)
@@ -575,6 +833,7 @@ def process_single_message(message: str, context, processing_ms=0.0, web_search_
         if "difference between" in low:
             a, b = m_cmp.group(1).strip(), m_cmp.group(2).strip()
         result_text = compare_topics(a, b)
+        context.last_comparison = (a.strip(), b.strip())
         payload = format_response(text=result_text, intent="COMPARE", rule_id="compare", confidence=0.85, tool="Comparison", action="Compare alternatives and trade-offs", processing_ms=processing_ms)
         context.add_exchange(text, payload["response"], "COMPARE", "compare", 0.85)
         return payload
@@ -655,12 +914,19 @@ def process_single_message(message: str, context, processing_ms=0.0, web_search_
         context.add_exchange(text, payload["response"], "FILE_GENERATION", payload["rule_id"], 0.95)
         return payload
 
-    # 5i) Explain simply: use the rule answer, shortened
+    # 5i) Explain simply: the full rule answer, structured as a
+    # definition plus key points — never truncated to one flat
+    # sentence, so the presentation layer can show real structure.
     m_simple = re.search(r"explain (.+?) (simply|in simple language|in simple terms)", low)
     if m_simple:
         rule = match_rule(m_simple.group(1))
         if rule["intent"] != "UNKNOWN":
-            payload = format_response(text=f"In simple terms: {_first_sentence(rule['response'])}",
+            _sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", rule["response"].strip()) if s.strip()]
+            if len(_sents) >= 2:
+                _explain_text = _sents[0] + "\n\nKey points:\n" + "\n".join(f"- {s}" for s in _sents[1:])
+            else:
+                _explain_text = rule["response"]
+            payload = format_response(text=_explain_text,
                 intent=rule["intent"], rule_id=rule["rule_id"], confidence=rule["confidence"], tool="Rule engine", action="Explain simply", processing_ms=processing_ms)
             context.add_exchange(text, payload["response"], rule["intent"], rule["rule_id"], rule["confidence"], topic=rule.get("topic", ""))
             return payload
@@ -758,10 +1024,43 @@ def process_single_message(message: str, context, processing_ms=0.0, web_search_
                 return web_payload
         return unavailable_howto_payload(text, context, processing_ms)
 
+    # 5n) Quiz on the previous comparison: "give me a quiz on that
+    # comparison" must quiz the compared topics from the comparison
+    # itself — never fall back to a web search (which returned
+    # English-grammar content for a Python/JavaScript comparison).
+    if re.search(r"\bquiz\b|\btest me\b|\bmcq\b", low):
+        _quiz_pair = None
+        _cmp = getattr(context, "last_comparison", None) or ()
+        if _cmp and (re.search(r"\b(that|this|the)\b.*\bcomparison\b|\bcomparison\b", low)
+                    or any(n.lower() in low for n in _cmp)):
+            _quiz_pair = _cmp
+        else:
+            _m_quiz = re.search(r"quiz (?:me )?on ([a-z]+) (?:and|vs|versus) ([a-z]+)", low)
+            if _m_quiz:
+                _quiz_pair = (_m_quiz.group(1), _m_quiz.group(2))
+        if _quiz_pair:
+            _quiz_text = _comparison_quiz_answer(_quiz_pair[0], _quiz_pair[1], context)
+            if _quiz_text:
+                payload = format_response(text=_quiz_text, intent="QUIZ", rule_id="comparison_quiz",
+                    confidence=0.90, tool="Comparison", action="Quiz on the comparison",
+                    processing_ms=processing_ms)
+                context.add_exchange(text, payload["response"], "QUIZ", "comparison_quiz", 0.90)
+                return payload
+
     # 6) Rule engine, with the LLM as a labelled fallback for UNKNOWN or
     # low-confidence answers only. High-confidence rule answers, maths,
     # search, documents and files above are never replaced by the model.
     rule = match_rule(text)
+    if rule["intent"] == "UNKNOWN":
+        # Typo tolerance: a close misspelling of a known topic
+        # ("wht is fotosintesis") is corrected and re-matched, so it
+        # reaches its rule instead of the web fallback. Gibberish
+        # with no close match keeps falling back as before.
+        _corrected = _fuzzy_correct(text)
+        if _corrected:
+            _fixed = match_rule(_corrected)
+            if _fixed["intent"] != "UNKNOWN" and _fixed["confidence"] >= 0.45:
+                rule = _fixed
     if rule["intent"] == "UNKNOWN" or rule["confidence"] < 0.45:
         llm, _llm_error = _llm_answer(text, context, processing_ms)
         if llm is not None:
@@ -799,6 +1098,13 @@ def process_message(message: str, context, processing_ms=0.0, web_search_enabled
     """
     text = (message or "").strip()
     low = text.lower()
+    # Multi-part instruction ("explain X to a 10 year old, then give
+    # 3 fun facts, then ask me one question"): handled whole, before
+    # the " then " split, so no part is answered in isolation (the
+    # word "give" must never reach the dictionary/web fallback).
+    _multi = _multipart_instruction(text, context, processing_ms)
+    if _multi is not None:
+        return _multi
     if " then " in low and not low.startswith("run python code"):
         parts = [p.strip() for p in re.split(r"\s+then\s+", text) if p.strip()]
         if len(parts) > 1 and len(parts) <= 5:

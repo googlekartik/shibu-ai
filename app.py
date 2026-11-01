@@ -4,6 +4,7 @@ Run:  python app.py
 Then open: http://127.0.0.1:5000
 """
 import os
+import re
 import uuid
 
 from dotenv import load_dotenv
@@ -184,6 +185,16 @@ def _session_user_id():
 # logged-in user. The main chat is unaffected.
 def _dev_panel_enabled():
     return os.environ.get("DEV_PANEL", "").strip().lower() in ("1", "true", "yes")
+
+
+@app.before_request
+def _refuse_chat_in_dev_panel_mode():
+    """In developer-panel mode chat is disabled for every method on
+    /api/chat — not just POST. A bare 405 for GET looks like a
+    routing accident; an explicit JSON 403 says chat is disabled
+    on this service, in the same style as the POST refusal."""
+    if _dev_panel_enabled() and request.path == "/api/chat":
+        return jsonify({"error": "Developer panel mode: chat is disabled on this service."}), 403
 
 
 def _dev_owner_configured():
@@ -468,6 +479,26 @@ def chat():
                        "quick_actions": QUICK_ACTIONS}
             return jsonify(payload)
         if profile["onboarding_stage"] == "ask_goal":
+            # A quick-action click (e.g. "Ask a question") is the
+            # goal answer, not a chat query: record it by completing
+            # onboarding and acknowledging it. The literal button
+            # label must never be web-searched as a question.
+            _goal_norm = re.sub(r"\s+", " ", message_or_error.strip().lower().strip(" .!?"))
+            _quick_norm = {re.sub(r"\s+", " ", q.lower()): q for q in QUICK_ACTIONS}
+            if _goal_norm in _quick_norm:
+                _save_profile(onboarding_completed=True, onboarding_stage=None)
+                _goal = _quick_norm[_goal_norm]
+                _ack = {"Search the web": "Great — ask me anything and I'll search the web for the latest information.",
+                        "Ask a question": "Great — go ahead and ask me anything.",
+                        "Learn something new": "Great — tell me what you'd like to learn about.",
+                        "Write or create something": "Great — tell me what you'd like me to write or create.",
+                        "Help me with something else": "Great — tell me what you need help with."}.get(_goal, "Great — what would you like to do?")
+                payload = {"response": _ack,
+                           "intent": "ONBOARDING", "rule_id": "onboarding_goal",
+                           "confidence": 1.0, "confidence_label": "HIGH",
+                           "tool": "Onboarding", "action": "Goal recorded"}
+                ctx.add_exchange(message_or_error, _ack, "ONBOARDING", "onboarding_goal", 1.0)
+                return jsonify(payload)
             _save_profile(onboarding_completed=True, onboarding_stage=None)
     # Smaller memory upgrade: restore memories + recent history once
     # per session for logged-in users, before RAG / router run.
@@ -529,7 +560,17 @@ def chat():
                 _record_query_event(message_or_error, _payload, timer.elapsed_ms())
                 return jsonify(_payload)
             if _forced_doc and not _rag.get("evidence_found"):
-                _payload = {"response": "I searched your documents but did not find passages that answer that question. Try rephrasing with words from the document, or upload the document first with /api/rag/ingest.",
+                try:
+                    _has_docs = bool(_sqlite_store().list_documents(_session_user_id()))
+                except Exception:
+                    _has_docs = False
+                if _has_docs:
+                    _no_evidence = ("I searched your documents but none of them cover that question. "
+                                    "Try rephrasing with words from the document itself.")
+                else:
+                    _no_evidence = ("I searched your documents but you have not uploaded any documents yet. "
+                                    "Upload a document first, then ask about it.")
+                _payload = {"response": _no_evidence,
                             "intent": "RAG_NO_EVIDENCE", "rule_id": "rag_no_evidence", "confidence": 0.90,
                             "confidence_label": "HIGH", "tool": "Pinecone RAG" if _rag.get("backend") == "pinecone" else "SQLite fallback RAG",
                             "action": "No relevant document evidence", "sources": [],

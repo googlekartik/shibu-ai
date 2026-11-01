@@ -33,6 +33,75 @@ class MetaService:
         # Safe: never includes the key.
         return {"enabled": self.enabled, "model": self.model if self.enabled else None}
 
+    @staticmethod
+    def _extract_text(data):
+        """Pull assistant text from a Meta-compatible response body.
+
+        The exact response shape is not documented here and may vary,
+        so several plausible shapes are tried in order. No shape is
+        assumed to be *the* real one, and no raw payload is ever
+        surfaced: a body that matches none of them is simply
+        unparseable. Returns the text, or None.
+        """
+        if not isinstance(data, dict):
+            return None
+
+        def _text_from_content(content):
+            """A content value that is a string, or a list of parts."""
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+            if isinstance(content, list):
+                parts = []
+                for part in content:
+                    if isinstance(part, dict):
+                        piece = part.get("text")
+                        if isinstance(piece, str) and piece.strip():
+                            parts.append(piece.strip())
+                    elif isinstance(part, str) and part.strip():
+                        parts.append(part.strip())
+                if parts:
+                    return "\n".join(parts)
+            return None
+
+        # 1. OpenAI chat-completions shape: choices[0].message.content
+        choices = data.get("choices")
+        if isinstance(choices, list) and choices:
+            first = choices[0]
+            if isinstance(first, dict):
+                text = _text_from_content((first.get("message") or {}).get("content"))
+                if text:
+                    return text
+                text = _text_from_content(first.get("text"))
+                if text:
+                    return text
+                text = _text_from_content(first.get("content"))
+                if text:
+                    return text
+        # 2. Responses-style shape: output[].content[].text (+ output_text)
+        output = data.get("output")
+        if isinstance(output, list):
+            parts = []
+            for item in output:
+                if isinstance(item, dict):
+                    text = _text_from_content(item.get("content"))
+                    if text:
+                        parts.append(text)
+            if parts:
+                return "\n".join(parts)
+        text = _text_from_content(data.get("output_text"))
+        if text:
+            return text
+        # 3. Messages-style shape: content[].text
+        text = _text_from_content(data.get("content"))
+        if text:
+            return text
+        # 4. Top-level plain-text fields.
+        for key in ("text", "answer", "response"):
+            text = _text_from_content(data.get(key))
+            if text:
+                return text
+        return None
+
     def generate(self, messages, max_tokens=256, temperature=0.7):
         """Return (text, error). text is None on failure."""
         if not self.enabled:
@@ -48,10 +117,9 @@ class MetaService:
                       "max_tokens": max_tokens, "temperature": temperature},
                 timeout=60)
             if resp.status_code == 200:
-                data = resp.json()
-                choices = data.get("choices") or []
-                if choices and choices[0].get("message", {}).get("content"):
-                    return choices[0]["message"]["content"].strip(), None
+                text = self._extract_text(resp.json())
+                if text:
+                    return text, None
                 return None, "The Meta-compatible API returned a response in an unexpected format."
             try:
                 err = resp.json().get("error", {})

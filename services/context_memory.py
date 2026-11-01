@@ -47,6 +47,60 @@ def _fmt(value):
     return ("%.6f" % value).rstrip("0").rstrip(".")
 
 
+# Conservative plain-word replacements for "explain it more simply".
+# Only long or formal wording is swapped; a sentence with none of
+# these keeps its wording, so a simplified answer never invents
+# facts — it only rewords the previous answer.
+_SIMPLIFY = (
+    ("in the presence of", "with"),
+    ("process by which", "way"),
+    ("converts", "changes"),
+    ("convert", "change"),
+    ("produces", "makes"),
+    ("produce", "make"),
+    ("utilise", "use"),
+    ("utilize", "use"),
+    ("requires", "needs"),
+    ("using", "with"),
+    ("releasing", "giving off"),
+)
+
+
+def simplify_sentence(sentence: str) -> str:
+    """Reword one sentence in plainer words: drop equations and
+    parenthetical asides, swap formal wording for short words.
+    Returns the reworded sentence (possibly unchanged)."""
+    text = (sentence or "").strip()
+    text = re.sub(r"\$[^$]*\$", "", text)
+    text = re.sub(r"\([^)]*\)", "", text)
+    low = text.lower()
+    for old, new in _SIMPLIFY:
+        if old in low:
+            text = re.sub(re.escape(old), new, text, flags=re.I)
+            low = text.lower()
+    return re.sub(r"\s+", " ", text).strip(" .") + ("." if text else "")
+
+
+def _shorten_answer(bot_a: str) -> str:
+    """First sentence only; for a one-sentence answer, the first
+    clause, so the result is always strictly shorter than the
+    previous answer."""
+    first = _sentences(bot_a)
+    if not first:
+        return bot_a
+    if len(first) > 1 or len(first[0]) < len(bot_a.strip()):
+        return first[0]
+    sentence = first[0]
+    for sep in (", ", "; ", " — ", " - "):
+        head = sentence.split(sep, 1)[0].strip()
+        if len(head.split()) >= 5 and len(head) < len(sentence):
+            return head + "."
+    words = sentence.split()
+    if len(words) > 8:
+        return " ".join(words[: max(5, len(words) * 3 // 5)]) + "…"
+    return sentence
+
+
 def _previous_number(context):
     value = getattr(context, "last_numeric_value", None)
     if value is not None:
@@ -148,9 +202,11 @@ def apply_math_followup(resolved):
         result = prev * operand
     else:
         result = prev / operand
+    verbs = {"add": "added to", "subtract": "subtracted from",
+             "multiply": "multiplied with", "divide": "divided by"}
     return (f"{_fmt(prev)} {resolved['symbol']} {_fmt(operand)} = {_fmt(result)}\n"
             f"Answer: {_fmt(result)}\n"
-            f"(Continuing your running total — added to your previous answer, {_fmt(prev)}.)")
+            f"(Continuing your running total — {verbs.get(op, 'applied to')} your previous answer, {_fmt(prev)}.)")
 
 
 def resolve_previous_reference(text, context):
@@ -223,19 +279,22 @@ def resolve_followup(text, context):
                              "question again, or tell me the topic.")}
 
     # "Explain it more simply." / "Explain that more simply."
+    # The simplified wording must differ from the previous answer:
+    # plain-word rewording, not the same sentence with a new prefix.
     if re.search(r"\bexplain (it|that|this)\b.*\b(simpl|easier)\b|\bmore simply\b|\bsimpler\b", low):
         if not bot_a:
             return need_context("answer")
         first = _sentences(bot_a)
         return {"kind": "simpler",
-                "answer": f"In simple terms: {first[0]}" if first else bot_a}
-    # "Make it shorter."
+                "answer": f"In simple terms: {simplify_sentence(first[0])}" if first else bot_a}
+    # "Make it shorter." — strictly shorter than the previous answer:
+    # the first sentence only (or the first clause for a
+    # one-sentence answer), never the whole answer again.
     if re.search(r"\b(make it|make that) shorter\b|\bshorter version\b|\bshort version\b", low):
         if not bot_a:
             return need_context("answer")
-        first = _sentences(bot_a)
         return {"kind": "shorter",
-                "answer": f"Short version: {first[0]}" if first else bot_a}
+                "answer": f"Short version: {_shorten_answer(bot_a)}"}
     # "Give me another example." — topic must be retained, not re-asked.
     # But "another example of <new topic>" names its own topic; let the
     # normal pipeline answer that topic instead of forcing old context.

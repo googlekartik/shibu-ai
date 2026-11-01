@@ -75,6 +75,13 @@ class ConversationContext:
         # anonymous users. Used only for identity wording and the LLM
         # system prompt — never for a backend/provider claim.
         self.character_name = ""
+        # Last code template generated, so "write the same in
+        # JavaScript" can reuse the task in the new language.
+        self.last_code_task = ""
+        self.last_code_language = ""
+        # Last comparison answered (entity names), so "quiz me on
+        # that comparison" can quiz the compared topics.
+        self.last_comparison = ()
 
     def remember(self, fact: str) -> bool:
         """Store one explicit memory. False when empty/duplicate/too long."""

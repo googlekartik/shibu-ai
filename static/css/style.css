@@ -59,6 +59,11 @@ a.source-item { color:#b7a7ff; }
 .announcement button { background:none; border:none; color:#a0a0a0; font-size:18px;
   cursor:pointer; padding:0 2px; flex:none; }
 .announcement button:hover { color:#fff; }
+/* The banner uses display:flex, which beats the plain .hidden rule
+   (same specificity, later in the file) — so an empty or dismissed
+   banner stayed visible. The compound selector wins, as with the
+   sidebar below. */
+.announcement.hidden { display:none; }
 .google-btn { display:inline-block; background:#fff; color:#111; font-weight:600;
   padding:12px 22px; border-radius:24px; text-decoration:none; }
 .google-btn:hover { background:#e8e8e8; }

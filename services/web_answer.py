@@ -16,6 +16,90 @@ No external dependencies, and no LLM is needed for this step.
 """
 
 from utils.text_processing import clean_text, extract_key_sentences
+import re
+
+_GENERIC_WORDS = frozenset({
+    "latest", "recent", "news", "today", "update", "updates", "breaking",
+    "search", "find", "current", "trending", "information", "info", "top",
+    "best", "new", "please", "tell", "me", "about", "what", "whats", "is",
+    "the", "a", "an", "how", "to", "do", "i", "can", "you", "give", "for",
+    "of", "in", "on", "and", "or", "are", "was", "were", "be", "by", "with",
+    "from", "that", "this", "it", "its", "my", "your", "when", "where",
+    "which", "who", "why", "does", "did", "should", "would", "could",
+    "explain", "define", "meaning", "look", "up", "browse", "step", "steps",
+})
+
+# Title/snippet patterns that mark a result as media/budget content
+# rather than instructions. Only applied to how-to queries, where a
+# film or book title starting "How to..." otherwise pollutes the steps.
+_POLLUTION_PATTERNS = (
+    re.compile(r"\bfilm\b", re.I),
+    re.compile(r"\bmovie\b", re.I),
+    re.compile(r"\bbox office\b", re.I),
+    re.compile(r"\bstarring\b", re.I),
+    re.compile(r"\bdirected by\b", re.I),
+    re.compile(r"\bnovel\b", re.I),
+    re.compile(r"\bbestseller\b", re.I),
+    re.compile(r"\bpublished\b.{0,20}\bby\b", re.I),
+    re.compile(r"\bbudget\b", re.I),
+    re.compile(r"\$\s?\d", re.I),
+    re.compile(r"\((film|movie|novel|book|tv series)\)", re.I),
+)
+
+
+def _substantive_terms(query: str) -> list:
+    """Query words that a relevant result must mention. Generic
+    words like 'news' or 'latest' never qualify a result on their
+    own — 'AI' in 'latest AI news' must match the result text."""
+    words = re.findall(r"[a-z0-9]+", (query or "").lower())
+    terms = [w for w in words if w not in _GENERIC_WORDS and len(w) >= 2]
+    low = (query or "").lower()
+    if "artificial intelligence" in low and "artificial intelligence" not in terms:
+        terms.append("artificial intelligence")
+    return terms
+
+
+def _mentions(text: str, term: str) -> bool:
+    if " " in term:
+        return term in text.lower()
+    return re.search(r"\b" + re.escape(term) + r"\b", text.lower()) is not None
+
+
+def _is_polluted(result: dict) -> bool:
+    hay = f"{result.get('title', '')} {result.get('snippet', '')}"
+    return any(p.search(hay) for p in _POLLUTION_PATTERNS)
+
+
+def filter_results(query: str, results) -> list:
+    """Drop irrelevant and non-instructional results before an
+    answer is built from them.
+
+    - Relevance: a result must mention at least one substantive
+      query term in its title or snippet. A query with no
+      substantive terms keeps all results, and if every result
+      would be dropped, all are kept (show something rather than
+      nothing).
+    - How-to pollution: for how-to queries, results about films,
+      books, budgets or box-office figures are dropped, since
+      their titles masquerade as instructions.
+    The original order and result dicts are preserved.
+    """
+    results = list(results or [])
+    if not results:
+        return results
+    terms = _substantive_terms(query)
+    kept = results
+    if terms:
+        relevant = [r for r in results
+                    if any(_mentions(f"{r.get('title', '')} {r.get('snippet', '')}", t)
+                           for t in terms)]
+        if relevant:
+            kept = relevant
+    if _is_howto_query(query):
+        clean = [r for r in kept if not _is_polluted(r)]
+        if clean:
+            kept = clean
+    return kept
 
 
 _IMPERATIVE_VERBS = ("boil", "pour", "add", "stir", "heat", "place", "put", "fill",
@@ -48,6 +132,7 @@ def _howto_score(sentence: str) -> int:
 
 def summarise_web_results(query: str, results, max_points: int = 3):
     """Return {'summary': str, 'key_points': [str]} for search results."""
+    results = filter_results(query, results)
     snippets = [clean_text(r.get("snippet", "")) for r in results if r.get("snippet")]
     titles = [clean_text(r.get("title", "")) for r in results if r.get("title")]
     points = extract_key_sentences(snippets, query, max_sentences=max_points)
@@ -65,6 +150,7 @@ def summarise_web_results(query: str, results, max_points: int = 3):
 
 def format_web_answer(query: str, results) -> str:
     """Full phrased web answer, with summary, key points and sources."""
+    results = filter_results(query, results)
     summary = summarise_web_results(query, results)
     parts = [f"Here's what I found on the web about '{query}':"]
     if summary["summary"]:

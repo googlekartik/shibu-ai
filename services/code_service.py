@@ -58,16 +58,168 @@ COMPARISONS = {
     ("flask", "django"): ("Flask is small and flexible — you choose your own database, forms and structure. Django is batteries-included — ORM, admin panel and authentication built in. Trade-off: freedom and simplicity for small apps (Flask) vs speed of building large apps with conventions (Django)."),
     ("sql", "nosql"): ("SQL databases use fixed tables and are best for structured data and complex joins with strong consistency. NoSQL databases use flexible documents/key-values and scale out easily for huge, changing data. Trade-off: consistency and structure (SQL) vs flexibility and horizontal scale (NoSQL)."),
     ("list", "tuple"): ("Lists are mutable (you can change them) and slightly slower; tuples are immutable (cannot be changed after creation), slightly faster, and can be used as dictionary keys. Trade-off: flexibility (list) vs safety and speed (tuple)."),
+    ("python", "javascript"): ("Python is a general-purpose, dynamically typed programming language that runs on servers, in data tools and in scripts, and is widely used for web development backends. JavaScript is a dynamically typed language that runs in every web browser and, with Node.js, also on servers, and is the main language of front-end web development. Python web frameworks include Django and Flask, which handle routing, databases and templates on the server. JavaScript web frameworks include React, Angular and Vue on the front end, with Node.js and Express on the back end. Python is often chosen for data-heavy backends and APIs, while JavaScript is chosen when the same language must run in the browser and on the server. Trade-off: a rich data and backend ecosystem (Python) vs the only language that runs natively in the browser (JavaScript)."),
 }
+
+# Hand-written quizzes for comparisons, so "quiz me on that
+# comparison" tests the comparison itself — never a web search.
+# Each question: {question, options, answer} with answer in options.
+COMPARISON_QUIZZES = {
+    ("python", "javascript"): [
+        {"question": "Which language runs in every web browser?",
+         "options": ["JavaScript", "Python", "Both Python and JavaScript"],
+         "answer": "JavaScript"},
+        {"question": "Which Python web framework is batteries-included?",
+         "options": ["Django", "React", "Express"],
+         "answer": "Django"},
+        {"question": "Which language runs on servers with Node.js?",
+         "options": ["JavaScript", "Python", "SQL"],
+         "answer": "JavaScript"},
+    ],
+}
+
+
+JS_TEMPLATES = {
+    "factorial": '''function factorial(n) {
+  let result = 1;
+  for (let i = 2; i <= n; i++) {
+    result *= i;
+  }
+  return result;
+}
+
+console.log(factorial(5)); // 120''',
+    "fibonacci": '''function fibonacci(n) {
+  const out = [];
+  let a = 0, b = 1;
+  for (let i = 0; i < n; i++) {
+    out.push(a);
+    [a, b] = [b, a + b];
+  }
+  return out;
+}
+
+console.log(fibonacci(10));''',
+    "reverse string": '''function reverseString(s) {
+  return s.split("").reverse().join("");
+}
+
+console.log(reverseString("Shibu")); // "ubihS"''',
+    "sort": '''const numbers = [5, 2, 9, 1, 7];
+numbers.sort((a, b) => a - b);
+console.log(numbers); // [1, 2, 5, 7, 9]''',
+    "prime": '''function isPrime(n) {
+  if (n < 2) return false;
+  for (let i = 2; i <= Math.sqrt(n); i++) {
+    if (n % i === 0) return false;
+  }
+  return true;
+}
+
+console.log(isPrime(7)); // true''',
+    "even odd": '''const number = 7;
+if (number % 2 === 0) {
+  console.log("Even");
+} else {
+  console.log("Odd");
+}''',
+    "palindrome": '''function isPalindrome(s) {
+  const clean = s.toLowerCase().replace(/ /g, "");
+  return clean === clean.split("").reverse().join("");
+}
+
+console.log(isPalindrome("madam")); // true''',
+}
+
+# Words that carry no task meaning in a code request. Removing them
+# lets "reverse a string" match the "reverse string" template, and
+# "write python code to find if a number is prime" match "prime".
+_CODE_STOPWORDS = frozenset({
+    "a", "an", "the", "write", "code", "python", "program", "please", "me",
+    "generate", "create", "show", "for", "to", "in", "using", "with", "that",
+    "can", "you", "give", "example", "of", "and", "explain", "it", "now",
+    "same", "javascript", "js", "java", "script", "function", "check",
+    "find", "is", "if", "number", "numbers", "or", "how", "do", "i",
+})
+# Single trigger words that name a task on their own.
+_TASK_ALIASES = {
+    "sorting": "sort", "sorted": "sort", "reverse": "reverse string",
+    "palindromes": "palindrome", "factorials": "factorial",
+}
+
+
+def detect_language(request: str) -> str:
+    """'javascript' when the request names JavaScript/JS, else 'python'."""
+    low = (request or "").lower()
+    if re.search(r"\bjavascript\b|\bjs\b|java\s*script", low):
+        return "javascript"
+    return "python"
+
+
+def match_task_key(request: str):
+    """Return the template key for a code request, or None.
+
+    Matches the exact phrase first ("reverse string"), then the
+    stopword-normalised word set ("reverse a string" -> reverse +
+    string), so articles and filler words never block a match.
+    """
+    low = (request or "").lower()
+    for key in CODE_TEMPLATES:
+        if key in low:
+            return key
+    words = set(re.findall(r"[a-z]+", low))
+    for alias, key in _TASK_ALIASES.items():
+        if alias in words:
+            return key
+    # Singular forms too: "palindromes" -> "palindrome".
+    expanded = set(words)
+    for w in words:
+        if w.endswith("s") and len(w) > 3:
+            expanded.add(w[:-1])
+    content = expanded - _CODE_STOPWORDS
+    for key in CODE_TEMPLATES:
+        if all(w in content for w in key.split()):
+            return key
+    return None
+
+
+def generate_code_for(task_key: str, language: str = "python"):
+    """Return (code, explanation) for a template key and language."""
+    if language == "javascript":
+        code = JS_TEMPLATES.get(task_key)
+        label = "JavaScript"
+    else:
+        code = CODE_TEMPLATES.get(task_key)
+        label = "Python"
+    if code is None:
+        return None, None
+    return code, (f"Here is {label} code for {task_key}. "
+                  "It is broken into small steps so you can follow it line by line.")
+
+
+def detect_code_request(request: str, last_task=None):
+    """Return (task_key, language) for a code request, or None.
+
+    Handles 'Write Python/JavaScript code to/for ...', 'code for ...',
+    and follow-ups like 'now write the same in JavaScript' (which
+    reuse the previous task in the new language).
+    """
+    low = (request or "").lower()
+    language = detect_language(request)
+    key = match_task_key(request)
+    if key:
+        return key, language
+    if last_task and re.search(r"\bwrite\b", low) and re.search(r"\b(same|it|that)\b", low):
+        return last_task, language
+    return None
 
 
 def generate_code(request: str):
     """Return (code, explanation) or (None, None) if no template matches."""
-    low = request.lower()
-    for key, code in CODE_TEMPLATES.items():
-        if key in low:
-            return code, f"Here is Python code for {key}. It is broken into small steps so you can follow it line by line."
-    return None, None
+    key = match_task_key(request)
+    if key is None:
+        return None, None
+    return generate_code_for(key, detect_language(request))
 
 
 def debug_code(code: str) -> str:
@@ -95,8 +247,22 @@ def debug_code(code: str) -> str:
     return "Step-by-step check:\n1. No syntax errors found — Python can read this code.\n2. If the result is still wrong, check the logic: print intermediate values, test with a small input (e.g. 2, 3), and check that variables are not overwritten by mistake."
 
 
+def _normalise_compare_name(name: str) -> str:
+    """'JavaScript for web development in a table' -> 'javascript';
+    'JS' -> 'javascript'. Trailing purpose phrases are not part of
+    the compared entity."""
+    text = (name or "").strip().lower().strip(" ?.")
+    text = re.split(r"\s+(?:for|in|as|with|to)\b", text, maxsplit=1)[0].strip()
+    text = re.sub(r"\s+(?:table|comparison|compared)$", "", text).strip()
+    if text in ("js", "java script"):
+        return "javascript"
+    if text == "py":
+        return "python"
+    return text
+
+
 def compare(a: str, b: str) -> str:
-    key = (a.strip().lower(), b.strip().lower())
+    key = (_normalise_compare_name(a), _normalise_compare_name(b))
     rev = (key[1], key[0])
     if key in COMPARISONS:
         return COMPARISONS[key]

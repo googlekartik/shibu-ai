@@ -413,7 +413,15 @@ async function sendMessage(text) {
   }
 }
 
-document.getElementById("attachBtn").onclick = () => document.getElementById("fileInput").click();
+// One file picker, opened the same way by the composer attach
+// button and the left-rail Upload button, so both always do the
+// same thing. Registered here, with the composer controls, so a
+// later top-level statement can never leave the rail unwired.
+function openFilePicker() {
+  const picker = document.getElementById("fileInput");
+  if (picker) picker.click();
+}
+document.getElementById("attachBtn").onclick = openFilePicker;
 document.getElementById("fileInput").addEventListener("change", async (e) => {
   const file = e.target.files[0];
   if (!file) return;
@@ -586,7 +594,7 @@ document.getElementById("railChat").onclick = () => inputEl.focus();
 document.getElementById("railHistory").onclick = () => {
   if (sidebarEl) { sidebarEl.classList.toggle("hidden"); if (!sidebarEl.classList.contains("hidden")) renderHistory(); }
 };
-document.getElementById("railUpload").onclick = () => document.getElementById("fileInput").click();
+document.getElementById("railUpload").onclick = openFilePicker;
 document.getElementById("newChatBtn").onclick = async () => {
   await fetch("/api/clear", { method: "POST" });
   messagesEl.innerHTML = "";

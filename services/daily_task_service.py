@@ -82,14 +82,13 @@ def _context_lines(context) -> list:
 
 
 def _friendly_error(err: str) -> str:
-    """Provider errors shown to users must be short and must never
-    contain a billing URL or raw API text."""
-    text = (err or "").strip()
-    low = text.lower()
-    if "429" in text or "no credits" in low or "insufficient_quota" in low or "quota" in low:
+    """Provider errors are internal detail: users get one short,
+    neutral line. Raw provider text (model names, payload shapes,
+    API messages, URLs) is never shown to the user."""
+    text = (err or "").strip().lower()
+    if "429" in text or "no credits" in text or "insufficient_quota" in text or "quota" in text:
         return "the language model's account has no credits left"
-    text = re.sub(r"https?://\S+", "", text).strip()
-    return text[:120] or "the language model returned nothing"
+    return "the language model could not draft this"
 
 
 def _llm_draft(kind: str, message: str, context) -> tuple:
@@ -243,9 +242,14 @@ def build_daily_task_payload(message: str, context, processing_ms: float = 0.0):
         # a how-to; returning None here would lose that chance.
         return None, True
     template = _template_plan(message) if kind == "plan" else _template_write(message)
+    # The note names only the friendly error category (quota vs
+    # generic failure) — never raw provider text, model names, or
+    # URLs, which _friendly_error already stripped.
+    _friendly = (error or "the language model could not draft this").strip()
+    _friendly = _friendly[:1].upper() + _friendly[1:]
     note = ("The language model is not enabled, so this is a basic template. "
             if error == "off" else
-            f"The language model could not draft this ({error}). Here is a basic template instead. ")
+            f"{_friendly}, so here is a basic template instead. ")
     payload = format_response(
         text=note + "\n\n" + template, intent="DAILY_TASK", rule_id=rule_id, confidence=0.70,
         tool="Template (no language model)", action="Draft from a template",

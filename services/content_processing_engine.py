@@ -69,7 +69,13 @@ def process_presentation(message: str, payload: dict, context=None) -> dict | No
     verification = verify(analysis, sources, source_kind=source_kind)
     blocks = structure(response, analysis, intent, sources=sources)
     blocks.extend(generate_visuals(blocks, intent, sources=sources))
-    quiz = build_quiz(analysis, intent)
+    # Quiz blocks only for genuine quiz requests or retrieved
+    # content — never for a template daily-plan/email answer, whose
+    # template sentences otherwise become fragment quiz options
+    # ("What is Here?") with no real question behind them.
+    _is_template_daily = str(payload.get("rule_id", "")).startswith("daily_") and \
+        "Template" in str(payload.get("tool", ""))
+    quiz = None if _is_template_daily else build_quiz(analysis, intent)
     if quiz:
         blocks.append(quiz)
     flashcards = build_flashcards(analysis, intent)

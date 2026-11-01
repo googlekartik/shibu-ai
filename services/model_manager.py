@@ -129,8 +129,8 @@ class ModelManager:
               call to META_API_BASE (default https://api.meta.ai/v1).
               Live use is UNVERIFIED — no key was available to test
               with. When set, it is tried before OpenAI/HF; on failure
-              the HF router is tried as a second chance when a token
-              is also configured, mirroring the OpenAI mode.
+              the next configured provider is tried (OpenAI, then the
+              HF router), mirroring the OpenAI mode's second chance.
     - "openai": OPENAI_API_KEY is set. ChatGPT API (gpt-4o-mini by
               default) — the fastest, most reliable hosted option, and
               the one used first when both OpenAI and HF keys are set.
@@ -306,8 +306,19 @@ class ModelManager:
             if text:
                 self.effective_model = self.model_id
                 return text, err
-            # Second chance, mirroring the OpenAI mode: only when a
-            # Hugging Face token is also configured.
+            # Provider fallthrough: a failed first provider must not
+            # end the answer when another configured provider can
+            # still answer. Try OpenAI next, then the Hugging Face
+            # router, in that order; only if all configured
+            # providers fail is the original Meta error returned,
+            # so the failure is never mislabelled.
+            if err and self.openai_key:
+                from services.openai_service import OpenAIService
+                oa = OpenAIService(api_key=self.openai_key, model=self.openai_model)
+                oa_text, _oa_err = oa.generate(messages, max_tokens=max_new_tokens, temperature=temperature)
+                if oa_text:
+                    self.effective_model = self.openai_model
+                    return oa_text, None
             if err and self.token:
                 hf_text, _hf_err = self._generate_api(messages, max_new_tokens, temperature)
                 if hf_text:

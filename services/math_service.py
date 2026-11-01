@@ -63,8 +63,35 @@ def _convert(value: float, from_unit: str, to_unit: str):
     return None
 
 
+def _annuity_parse(text: str):
+    """Parse a regular-savings sentence: a monthly deposit, an
+    annual interest rate, and a number of years.
+
+    e.g. 'I save 500 rupees a month at 12 percent annual interest
+    compounded monthly. How much do I have after 2 years?'
+    Returns (deposit, annual_rate_percent, years) or None.
+    """
+    low = text.lower()
+    if not re.search(r"\b(save|deposit|invest|put aside)\b", low):
+        return None
+    if not re.search(r"\b(per month|a month|monthly|every month)\b", low):
+        return None
+    if not re.search(r"\b(interest|percent|%)\b", low):
+        return None
+    dep = re.search(r"(?:save|deposit|invest|put aside)\s+(?:rs\.?|rupees?|₹|\$)?\s*(\d+(?:\.\d+)?)", low)
+    if not dep:
+        dep = re.search(r"(\d+(?:\.\d+)?)\s*(?:rs\.?|rupees?|₹|\$)?\s*(?:per month|a month|monthly|every month)", low)
+    rate = re.search(r"(\d+(?:\.\d+)?)\s*(?:percent|%|per\s*cent)", low)
+    yrs = re.search(r"(\d+(?:\.\d+)?)\s*(?:years?|yrs?)\b", low)
+    if not dep or not rate or not yrs:
+        return None
+    return float(dep.group(1)), float(rate.group(1)), float(yrs.group(1))
+
+
 def looks_like_math(text: str) -> bool:
     low = text.lower().strip()
+    if _annuity_parse(text) is not None:
+        return True
     if re.search(r"\bconvert\b.*\bto\b", low):
         return True
     if re.match(r"^(calculate|calc|compute)\b", low):
@@ -85,6 +112,22 @@ def looks_like_math(text: str) -> bool:
 class MathService:
     def calculate(self, raw: str):
         try:
+            # Regular savings (annuity): monthly deposit + annual
+            # rate + years -> future value, before SymPy parsing
+            # (a sentence is not an arithmetic expression).
+            annuity = _annuity_parse(raw)
+            if annuity is not None:
+                deposit, rate_pct, years = annuity
+                r = rate_pct / 100.0 / 12.0
+                n = int(round(years * 12))
+                fv = deposit * (((1 + r) ** n - 1) / r) if r > 0 else deposit * n
+                return {"success": True, "expression": raw.strip(),
+                        "calculation": (f"Monthly deposit {_fmt_num(deposit)}, annual rate {rate_pct}% "
+                                        f"compounded monthly: monthly rate r = {rate_pct}/100/12 = {r:.6f}, "
+                                        f"months n = {years:g} x 12 = {n}; "
+                                        f"FV = {_fmt_num(deposit)} x ((1 + {r:.6f})^{n} - 1) / {r:.6f}"),
+                        "answer": _fmt_num(fv)}
+
             expr_text = _clean(raw)
 
             # Percentage: "25% of 800"
