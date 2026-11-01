@@ -528,6 +528,45 @@ Details panel (the browser profile had cached the previous app.js).
   conversations with browser history instead of one replacing the other;
   Clear / New chat reset the Details panel contents as well as hiding it.
 - **Tests**: 139 pytest passed (132 + 3 model-fallback + 4 new daily-task
+
+## 31. Developer panel, Phase 1 — analytics + settings on a separate URL (2026-11-01, local only — NOT pushed to GitHub)
+
+A second Render service (`shibu-ai-dev`, same repo, `DEV_PANEL=1`) serves an
+owner-only panel at `/dev`: overview cards (users, logins, questions,
+fallback rate, documents), failed questions (the daily improvement list),
+top questions, users (names/activity only, no email, shortened IDs), and
+three settings that apply immediately to the main chat. Full setup:
+`docs/DEV_PANEL.md`. Chat is disabled on the dev service (403).
+
+- **Events + settings storage** (`services/sqlite_store.py`,
+  `services/postgres_store.py`, `services/dev_store.py`): new tables
+  `query_events`, `login_events`, `dev_settings` in both SQLite and
+  Postgres (schema: `infra/supabase_schema.sql`). Postgres is used only
+  when `DATABASE_URL` is set and a ping succeeds; every failure falls
+  back to SQLite, and settings reads never raise. No email is stored
+  or returned anywhere. Events are pruned after 30 days.
+- **Owner gate** (`app.py`): Google sign-in plus `DEV_OWNER_EMAIL` /
+  `DEV_OWNER_EMAILS` / `DEV_OWNER_SUB`. If none is configured the panel
+  is locked for everyone (fail-closed). Anonymous `/api/dev/*` -> 401,
+  logged-in non-owner -> 403, `/dev` for non-owners -> 403 plain text.
+- **Settings** (allowlisted to exactly three keys): `web_search_enabled`
+  (threaded through `process_message`/`process_single_message`; when
+  off, the web fallback never runs and the graceful fallback is
+  returned, and the RAG web-append branch is skipped),
+  `ensemble_enabled` (stored and shown only — Phase 3), `announcement`
+  (public `GET /api/public/settings`, banner in the chat UI, capped at
+  500 chars, dismissible per browser session, `textContent` only).
+- **Event recording** (`app.py`, best-effort): every successful chat
+  answer and every Google sign-in is recorded; onboarding messages are
+  not. A recording failure can never break chat.
+- **Panel frontend** (`templates/dev.html`, `static/css/dev.css`,
+  `static/js/dev.js`): black theme, DOM-only rendering, no new
+  libraries, "Send to Pihu" copy box (the panel cannot command Pihu
+  directly — the copied instruction is pasted in chat).
+- **Not built (Phase 2/3, reserved)**: API-key manager (Render API)
+  and the multi-model ensemble. No dead endpoints exist for them.
+- **Tests**: see `tests/test_dev_panel_2026.py` (panel gate, settings
+  validation, web-search toggle, Postgres fake-connection SQL checks).
   checks). Live Flask (no keys): ML explain now returns heading +
   Definition + Key points blocks; static JS serves `Cache-Control:
   no-cache, max-age=0`. Still needs Kartik: OpenAI credits (or an HF

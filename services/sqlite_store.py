@@ -100,6 +100,29 @@ CREATE TABLE IF NOT EXISTS user_memories (
     FOREIGN KEY (user_id) REFERENCES users(user_id)
 );
 CREATE INDEX IF NOT EXISTS idx_memories_user ON user_memories(user_id, created_at);
+CREATE TABLE IF NOT EXISTS query_events (
+    event_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    question TEXT DEFAULT '',
+    intent TEXT DEFAULT '',
+    rule_id TEXT DEFAULT '',
+    confidence REAL DEFAULT 0,
+    is_fallback INTEGER DEFAULT 0,
+    processing_ms REAL DEFAULT 0,
+    created_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_query_events_created ON query_events(created_at);
+CREATE TABLE IF NOT EXISTS login_events (
+    event_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    created_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_login_events_created ON login_events(created_at);
+CREATE TABLE IF NOT EXISTS dev_settings (
+    setting_key TEXT PRIMARY KEY,
+    setting_value TEXT DEFAULT '',
+    updated_at REAL
+);
 """
 
 
@@ -323,6 +346,103 @@ class SQLiteStore:
         if not convs:
             return []
         return self.list_messages(user_id, convs[0]["conversation_id"], limit=limit)
+
+    # -- developer panel: query/login events + settings -----------
+    # Best-effort analytics for the owner-only panel. No email is
+    # ever stored or returned: the users table has no email column.
+    def record_query_event(self, user_id: str, question: str, intent: str = "",
+                           rule_id: str = "", confidence: float = 0.0,
+                           is_fallback: bool = False, processing_ms: float = 0.0):
+        self._conn.execute(
+            "INSERT INTO query_events (event_id, user_id, question, intent, rule_id, confidence, is_fallback, processing_ms, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (uuid.uuid4().hex, user_id, (question or "")[:500], intent or "",
+             rule_id or "", float(confidence or 0), 1 if is_fallback else 0,
+             float(processing_ms or 0), self._now()))
+        self._conn.commit()
+
+    def record_login_event(self, user_id: str):
+        self._conn.execute(
+            "INSERT INTO login_events (event_id, user_id, created_at) VALUES (?,?,?)",
+            (uuid.uuid4().hex, user_id, self._now()))
+        self._conn.commit()
+
+    def get_setting(self, key: str, default=None):
+        row = self._conn.execute(
+            "SELECT setting_value FROM dev_settings WHERE setting_key=?", (key,)).fetchone()
+        return row["setting_value"] if row else default
+
+    def set_setting(self, key: str, value):
+        if isinstance(value, bool):
+            value = "1" if value else "0"
+        self._conn.execute(
+            "INSERT INTO dev_settings (setting_key, setting_value, updated_at) VALUES (?,?,?) "
+            "ON CONFLICT(setting_key) DO UPDATE SET setting_value=excluded.setting_value, updated_at=excluded.updated_at",
+            (key, str(value), self._now()))
+        self._conn.commit()
+
+    def analytics_overview(self, days: int = 7):
+        now = self._now()
+        window_start = now - max(1, days) * 86400
+        today_start = now - (now % 86400)
+        total_users = self._conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        logins_today = self._conn.execute(
+            "SELECT COUNT(*) FROM login_events WHERE created_at>=?", (today_start,)).fetchone()[0]
+        logins_7d = self._conn.execute(
+            "SELECT COUNT(*) FROM login_events WHERE created_at>=?", (window_start,)).fetchone()[0]
+        questions_today = self._conn.execute(
+            "SELECT COUNT(*) FROM query_events WHERE created_at>=?", (today_start,)).fetchone()[0]
+        questions_7d = self._conn.execute(
+            "SELECT COUNT(*) FROM query_events WHERE created_at>=?", (window_start,)).fetchone()[0]
+        fallback_count = self._conn.execute(
+            "SELECT COUNT(*) FROM query_events WHERE created_at>=? AND is_fallback=1", (window_start,)).fetchone()[0]
+        documents_total = self._conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+        return {
+            "total_users": total_users,
+            "logins_today": logins_today,
+            "logins_7d": logins_7d,
+            "questions_today": questions_today,
+            "questions_7d": questions_7d,
+            "fallback_count_7d": fallback_count,
+            "fallback_rate_7d": (fallback_count / questions_7d) if questions_7d else 0.0,
+            "documents_total": documents_total,
+        }
+
+    def top_questions(self, days: int = 7, limit: int = 20):
+        cutoff = self._now() - max(1, days) * 86400
+        rows = self._conn.execute(
+            "SELECT question, COUNT(*) AS c FROM query_events "
+            "WHERE created_at>=? AND question != '' GROUP BY question ORDER BY c DESC, question ASC LIMIT ?",
+            (cutoff, limit)).fetchall()
+        return [{"question": r["question"], "count": r["c"]} for r in rows]
+
+    def failed_questions(self, days: int = 7, limit: int = 20):
+        cutoff = self._now() - max(1, days) * 86400
+        rows = self._conn.execute(
+            "SELECT question, COUNT(*) AS c FROM query_events "
+            "WHERE created_at>=? AND is_fallback=1 AND question != '' GROUP BY question ORDER BY c DESC, question ASC LIMIT ?",
+            (cutoff, limit)).fetchall()
+        return [{"question": r["question"], "count": r["c"]} for r in rows]
+
+    def recent_users(self, limit: int = 20):
+        rows = self._conn.execute(
+            "SELECT u.user_id, u.display_name, u.avatar_id, u.created_at, u.updated_at, "
+            "COUNT(m.message_id) AS message_count, MAX(m.created_at) AS last_msg "
+            "FROM users u LEFT JOIN messages m ON m.user_id = u.user_id "
+            "GROUP BY u.user_id ORDER BY COALESCE(MAX(m.created_at), u.updated_at) DESC LIMIT ?",
+            (limit,)).fetchall()
+        return [{"user_id": r["user_id"], "display_name": r["display_name"],
+                 "avatar_id": r["avatar_id"], "created_at": r["created_at"],
+                 "updated_at": r["updated_at"], "message_count": r["message_count"],
+                 "last_active": r["last_msg"] if r["last_msg"] is not None else r["updated_at"]}
+                for r in rows]
+
+    def prune_events(self, days: int = 30):
+        cutoff = self._now() - max(1, days) * 86400
+        q = self._conn.execute("DELETE FROM query_events WHERE created_at<?", (cutoff,))
+        l = self._conn.execute("DELETE FROM login_events WHERE created_at<?", (cutoff,))
+        self._conn.commit()
+        return {"query_events": q.rowcount, "login_events": l.rowcount}
 
     def migrate_session_history(self, user_id: str, exchanges: list, confirm: bool = False):
         """Explicit migration only. confirm=False does nothing and

@@ -478,3 +478,22 @@ if (!SpeechRec) {
   if (!restored && !welcomed) addMessage("Hello! I'm Shibu AI. How can I help you today?", "bot");
   renderHistory();
 })();
+
+// Developer-panel announcement banner: textContent only, never
+// innerHTML. Dismissed for this browser session via sessionStorage.
+(async () => {
+  try {
+    const res = await fetch("/api/public/settings");
+    const data = await res.json();
+    const text = (data.announcement || "").trim();
+    if (!text) return;
+    if (sessionStorage.getItem("shibu_announcement_dismissed") === text) return;
+    const banner = document.getElementById("announcement");
+    document.getElementById("announcementText").textContent = text;
+    banner.classList.remove("hidden");
+    document.getElementById("announcementDismiss").onclick = () => {
+      sessionStorage.setItem("shibu_announcement_dismissed", text);
+      banner.classList.add("hidden");
+    };
+  } catch (e) {}
+})();

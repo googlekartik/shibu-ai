@@ -1,0 +1,35 @@
+/* Developer panel: same black, clean theme as the main chat. */
+* { box-sizing: border-box; }
+body { margin: 0; background: #000; color: #f5f5f5;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  min-height: 100vh; }
+.dev-topbar { display: flex; justify-content: space-between; align-items: center;
+  max-width: 900px; width: 100%; margin: 0 auto; padding: 18px 20px 10px; }
+.dev-brand { font-weight: 700; font-size: 18px; }
+.dev-top-actions { display: flex; gap: 14px; }
+.dev-link { color: #b7a7ff; text-decoration: none; font-size: 14px; }
+.dev-link:hover { color: #fff; }
+.dev-wrap { max-width: 900px; width: 100%; margin: 0 auto; padding: 10px 20px 40px; }
+.dev-wrap section { margin: 28px 0; }
+.dev-wrap h2 { font-size: 18px; margin: 0 0 6px; }
+.muted, .small { color: #a0a0a0; }
+.small { font-size: 13px; }
+.hidden { display: none; }
+.dev-error { background: #2a1212; border: 1px solid #7a2e2e; border-radius: 14px;
+  padding: 14px 16px; font-size: 14px; line-height: 1.6; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; margin-top: 12px; }
+.card { background: #141414; border: 1px solid #262626; border-radius: 14px; padding: 14px 16px; }
+.card-num { font-size: 26px; font-weight: 700; }
+.card-label { color: #a0a0a0; font-size: 13px; margin-top: 4px; }
+.dev-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 14px; }
+.dev-table th, .dev-table td { text-align: left; padding: 9px 10px;
+  border-bottom: 1px solid #262626; vertical-align: top; overflow-wrap: anywhere; }
+.dev-table th { color: #a0a0a0; font-weight: 600; }
+.setting-row { display: flex; gap: 10px; align-items: flex-start; margin: 12px 0; font-size: 14px; line-height: 1.5; }
+.setting-col { flex-direction: column; }
+.setting-row textarea, #pihuTemplate { width: 100%; background: #141414; border: 1px solid #2c2c2c;
+  border-radius: 12px; color: #f5f5f5; font: inherit; font-size: 14px; padding: 10px 12px; resize: vertical; }
+.dev-btn { background: #7c5cff; color: #fff; border: none; border-radius: 20px;
+  padding: 9px 18px; font-size: 14px; cursor: pointer; }
+.dev-btn:hover { background: #8f76ff; }
+#settingsStatus, #copyStatus { margin-left: 10px; }

@@ -252,7 +252,7 @@ def _web_fallback_answer(text: str, context, processing_ms=0.0):
     return payload
 
 
-def process_single_message(message: str, context, processing_ms=0.0):
+def process_single_message(message: str, context, processing_ms=0.0, web_search_enabled=True):
     """Process one message. Returns the API payload dict."""
     text = message.strip()
     norm = normalize_for_matching(text)
@@ -728,9 +728,10 @@ def process_single_message(message: str, context, processing_ms=0.0):
     if daily_payload is not None:
         return daily_payload
     if _needs_web:
-        web_payload = _web_fallback_answer(text, context, processing_ms)
-        if web_payload is not None:
-            return web_payload
+        if web_search_enabled:
+            web_payload = _web_fallback_answer(text, context, processing_ms)
+            if web_payload is not None:
+                return web_payload
         return unavailable_howto_payload(text, context, processing_ms)
 
     # 6) Rule engine, with the LLM as a labelled fallback for UNKNOWN or
@@ -746,9 +747,10 @@ def process_single_message(message: str, context, processing_ms=0.0):
     # UNKNOWN with no LLM), try a text-processed web answer first.
     # This replaces the old dead-end message for unknown topics.
     if rule["intent"] == "UNKNOWN" or rule["rule_id"] == "definition":
-        web_payload = _web_fallback_answer(text, context, processing_ms)
-        if web_payload is not None:
-            return web_payload
+        if web_search_enabled:
+            web_payload = _web_fallback_answer(text, context, processing_ms)
+            if web_payload is not None:
+                return web_payload
     adapted = _adapt_to_preferences(rule["response"], context)
     if rule["intent"] != "UNKNOWN" and rule["confidence"] < 0.45:
         adapted += "\n\nNote: My confidence here is low, so please double-check this — I am not presenting a guess as a fact."
@@ -763,7 +765,7 @@ def process_single_message(message: str, context, processing_ms=0.0):
     return payload
 
 
-def process_message(message: str, context, processing_ms=0.0):
+def process_message(message: str, context, processing_ms=0.0, web_search_enabled=True):
     """Wrapper: handle multi-step instructions, then a single message.
 
     Multi-step example: "What is Python? then calculate 25% of 800"
@@ -778,7 +780,7 @@ def process_message(message: str, context, processing_ms=0.0):
             responses = []
             last_payload = None
             for part in parts:
-                last_payload = process_single_message(part, context, processing_ms)
+                last_payload = process_single_message(part, context, processing_ms, web_search_enabled=web_search_enabled)
                 responses.append(last_payload["response"])
             combined = format_response(
                 text="\n\n---\n\n".join(responses),
@@ -787,7 +789,7 @@ def process_message(message: str, context, processing_ms=0.0):
                 processing_ms=processing_ms)
             context.add_exchange(text, combined["response"], "MULTI_STEP", "multi_step", 0.90)
             return combined
-    payload = process_single_message(message, context, processing_ms)
+    payload = process_single_message(message, context, processing_ms, web_search_enabled=web_search_enabled)
     # Environment table, appended AFTER a normal answer, only when the
     # message actually describes an environment scenario (see
     # should_analyze). Explicit classify requests were already

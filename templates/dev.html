@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Shibu AI — Developer Panel</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/dev.css') }}">
+</head>
+<body>
+<header class="dev-topbar">
+  <div class="dev-brand">Shibu AI — Developer Panel</div>
+  <div class="dev-top-actions">
+    <a href="/" class="dev-link">Open main chat</a>
+    <a href="/login" class="dev-link">Sign in</a>
+  </div>
+</header>
+
+<main class="dev-wrap">
+  <div id="devError" class="dev-error hidden">
+    <p id="devErrorText"></p>
+    <p><a href="/login" class="dev-link">Sign in with the owner Google account</a></p>
+  </div>
+
+  <div id="devContent">
+    <section>
+      <h2>Overview</h2>
+      <p class="muted small">Events are kept for 30 days. Store: <span id="storeKind">—</span> · RAG backend: <span id="ragBackend">—</span> · LLM: <span id="llmInfo">—</span></p>
+      <div class="cards">
+        <div class="card"><div class="card-num" id="totalUsers">—</div><div class="card-label">Total users</div></div>
+        <div class="card"><div class="card-num" id="loginsToday">—</div><div class="card-label">Logins today</div></div>
+        <div class="card"><div class="card-num" id="logins7d">—</div><div class="card-label">Logins (7 days)</div></div>
+        <div class="card"><div class="card-num" id="questionsToday">—</div><div class="card-label">Questions today</div></div>
+        <div class="card"><div class="card-num" id="questions7d">—</div><div class="card-label">Questions (7 days)</div></div>
+        <div class="card"><div class="card-num" id="fallbackRate">—</div><div class="card-label">Fallback rate (7 days)</div></div>
+        <div class="card"><div class="card-num" id="documentsTotal">—</div><div class="card-label">Documents</div></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Failed questions — the improvement list</h2>
+      <p class="muted small">Questions the AI could not answer well. Each one is a rule, a document, or a fix waiting to be added.</p>
+      <table class="dev-table">
+        <thead><tr><th>Question</th><th>Times asked</th></tr></thead>
+        <tbody id="failedBody"></tbody>
+      </table>
+      <p id="failedEmpty" class="muted small hidden">No failed questions in this period. Good — or no questions recorded yet.</p>
+    </section>
+
+    <section>
+      <h2>Top questions</h2>
+      <table class="dev-table">
+        <thead><tr><th>Question</th><th>Times asked</th></tr></thead>
+        <tbody id="topBody"></tbody>
+      </table>
+      <p id="topEmpty" class="muted small hidden">No questions recorded yet.</p>
+    </section>
+
+    <section>
+      <h2>Users</h2>
+      <p class="muted small">Names and activity only — no email addresses are stored or shown, and user IDs are shown shortened (first 12 characters).</p>
+      <table class="dev-table">
+        <thead><tr><th>User</th><th>Name</th><th>Avatar</th><th>Messages</th><th>Last active</th></tr></thead>
+        <tbody id="usersBody"></tbody>
+      </table>
+      <p id="usersEmpty" class="muted small hidden">No users yet.</p>
+    </section>
+
+    <section>
+      <h2>Settings</h2>
+      <p class="muted small">Settings apply to the main chat immediately (they are read on every request). No redeploy needed.</p>
+      <form id="settingsForm">
+        <label class="setting-row"><input type="checkbox" id="webSearchToggle"> Web search enabled (fallback answers use DuckDuckGo)</label>
+        <label class="setting-row"><input type="checkbox" id="ensembleToggle"> Multi-model ensemble enabled — Phase 3, stored only, no behaviour change yet</label>
+        <label class="setting-row setting-col">Announcement shown on the main chat (max 500 characters, leave empty to hide)
+          <textarea id="announcementInput" rows="3" maxlength="500" placeholder="No announcement"></textarea>
+        </label>
+        <button type="submit" class="dev-btn">Save settings</button>
+        <span id="settingsStatus" class="muted small"></span>
+      </form>
+    </section>
+
+    <section>
+      <h2>Send to Pihu</h2>
+      <p class="muted small">The panel cannot send commands to Pihu directly. Copy this instruction, paste it in chat with Pihu, and Pihu will build it after your approval there.</p>
+      <textarea id="pihuTemplate" rows="6" readonly></textarea>
+      <button type="button" id="copyBtn" class="dev-btn">Copy instruction</button>
+      <span id="copyStatus" class="muted small"></span>
+    </section>
+  </div>
+</main>
+
+<script src="{{ url_for('static', filename='js/dev.js') }}"></script>
+</body>
+</html>

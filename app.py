@@ -33,6 +33,9 @@ from services.request_router import plan_request
 from services.request_limiter import request_limiter
 from services.retrieval_metrics import retrieval_metrics
 from services.sqlite_store import SQLiteStore
+from services.dev_store import (DEFAULT_SETTINGS, SETTING_KEYS, get_dev_setting,
+                                get_dev_settings_all, get_dev_store,
+                                set_dev_setting, store_kind)
 from services.math_service import looks_like_math
 from chatbot.rule_engine import match_rule
 from services.google_auth import (build_authorization_url, exchange_code,
@@ -175,6 +178,65 @@ def _session_user_id():
     return session.get("google_user_id")
 
 
+# -- Developer panel (Phase 1) --------------------------------------
+# Owner-only: the panel is fail-closed. If no owner identity is
+# configured in the environment, NOBODY can use it, including a
+# logged-in user. The main chat is unaffected.
+def _dev_panel_enabled():
+    return os.environ.get("DEV_PANEL", "").strip().lower() in ("1", "true", "yes")
+
+
+def _dev_owner_configured():
+    return bool(os.environ.get("DEV_OWNER_EMAIL", "").strip()
+                or os.environ.get("DEV_OWNER_EMAILS", "").strip()
+                or os.environ.get("DEV_OWNER_SUB", "").strip())
+
+
+def _is_dev_owner():
+    """True only for the configured owner, logged in via Google."""
+    if not _dev_owner_configured() or not _session_user_id():
+        return False
+    email = (session.get("google_email") or "").strip().lower()
+    owner_email = os.environ.get("DEV_OWNER_EMAIL", "").strip().lower()
+    owner_emails = {e.strip().lower() for e in os.environ.get("DEV_OWNER_EMAILS", "").split(",") if e.strip()}
+    owner_sub = os.environ.get("DEV_OWNER_SUB", "").strip()
+    if owner_email and email and email == owner_email:
+        return True
+    if owner_emails and email and email in owner_emails:
+        return True
+    if owner_sub and _session_user_id() in (owner_sub, "google#" + owner_sub):
+        return True
+    return False
+
+
+def _dev_store():
+    """Analytics/settings store: Postgres when configured and
+    reachable, else the app's SQLite store. Never raises."""
+    try:
+        return get_dev_store(_sqlite_store())
+    except Exception:
+        return _sqlite_store()
+
+
+def _record_query_event(message, payload, processing_ms):
+    """Best-effort analytics for the developer panel. Any failure
+    is swallowed: recording must never break chat."""
+    try:
+        intent = payload.get("intent", "")
+        rule_id = payload.get("rule_id", "")
+        confidence = float(payload.get("confidence") or 0)
+        is_fallback = (intent == "UNKNOWN"
+                       or rule_id in ("graceful_fallback", "unknown", "rag_no_evidence",
+                                      "daily_howto_unavailable")
+                       or confidence < 0.45)
+        _dev_store().record_query_event(
+            _session_user_id() or "anonymous", (message or "")[:500],
+            intent=intent, rule_id=rule_id, confidence=confidence,
+            is_fallback=is_fallback, processing_ms=float(processing_ms or 0))
+    except Exception:
+        pass
+
+
 # Onboarding avatars: illustrated assets in static/avatars/. The first
 # avatar is also the welcome image on /login. Files are swapped by
 # replacing these SVGs — no code change is needed for new artwork.
@@ -263,6 +325,8 @@ def _save_profile(display_name=None, avatar_id=None, onboarding_completed=None,
 
 @app.route("/")
 def index():
+    if _dev_panel_enabled():
+        return redirect("/dev")
     return render_template("index.html")
 
 
@@ -339,7 +403,15 @@ def chat():
     ok, message_or_error = validate_message(data.get("message"))
     if not ok:
         return jsonify({"error": message_or_error}), 400
+    if _dev_panel_enabled():
+        return jsonify({"error": "Developer panel mode: chat is disabled on this service."}), 403
     ctx = _context()
+    # Developer-panel setting: web search can be switched off from
+    # the panel. Default True; any settings failure keeps search on.
+    _store = _dev_store()
+    web_search_enabled = get_dev_setting(_store, "web_search_enabled", fallback_store=_sqlite_store())
+    if not isinstance(web_search_enabled, bool):
+        web_search_enabled = True
     # First-time welcome conversation (logged-in users only, and only
     # until onboarding completes). Anonymous chat is untouched.
     # Stage ask_name: the reply is the preferred name, saved only here
@@ -404,7 +476,7 @@ def chat():
                 _action = "Answer from your documents"
                 # Combined routing is intentionally explicit: it does not add a
                 # web request unless the user asks to compare/search online.
-                if _route["route"] == "rag_and_web":
+                if _route["route"] == "rag_and_web" and web_search_enabled:
                     _web_results = search_service.search(message_or_error)
                     if _web_results:
                         from services.web_answer import format_web_answer
@@ -424,6 +496,7 @@ def chat():
                 _attach_presentation(message_or_error, _payload, ctx)
                 ctx.add_exchange(message_or_error, _payload["response"], "RAG_ANSWER", "rag_answer", 0.85)
                 _save_chat_to_sqlite(message_or_error, _payload)
+                _record_query_event(message_or_error, _payload, timer.elapsed_ms())
                 return jsonify(_payload)
             if _forced_doc and not _rag.get("evidence_found"):
                 _payload = {"response": "I searched your documents but did not find passages that answer that question. Try rephrasing with words from the document, or upload the document first with /api/rag/ingest.",
@@ -433,6 +506,7 @@ def chat():
                             "backend": _rag.get("backend"), "processing_ms": round(timer.elapsed_ms(), 1)}
                 ctx.add_exchange(message_or_error, _payload["response"], "RAG_NO_EVIDENCE", "rag_no_evidence", 0.90)
                 _save_chat_to_sqlite(message_or_error, _payload)
+                _record_query_event(message_or_error, _payload, timer.elapsed_ms())
                 return jsonify(_payload)
     # In-memory cache, before the (slow) web search: only for
     # questions with no rule and no maths, so a rule/math answer is
@@ -458,9 +532,10 @@ def chat():
                     "cached": True, "processing_ms": round(timer.elapsed_ms(), 1),
                 }
                 _attach_presentation(message_or_error, payload, ctx)
+                _record_query_event(message_or_error, payload, timer.elapsed_ms())
                 return jsonify(payload)
     try:
-        payload = process_message(message_or_error, ctx, processing_ms=0.0)
+        payload = process_message(message_or_error, ctx, processing_ms=0.0, web_search_enabled=web_search_enabled)
         payload["processing_ms"] = round(timer.elapsed_ms(), 1)
         # No extra HF call here: the router already tries the LLM (via
         # ModelManager) for UNKNOWN / low-confidence answers, labelled
@@ -482,6 +557,7 @@ def chat():
                 pass
         _save_chat_to_sqlite(message_or_error, payload)
         _attach_presentation(message_or_error, payload, ctx)
+        _record_query_event(message_or_error, payload, timer.elapsed_ms())
         return jsonify(payload)
     except Exception as exc:
         logger.exception("Chat failed")
@@ -688,6 +764,12 @@ def google_callback():
     # Persistent SQLite user (profile + history), scoped by google#sub.
     try:
         _sqlite_store().get_or_create_user(user_id, display_name=claims.get("name", ""))
+    except Exception:
+        pass
+    # Developer-panel analytics: one login event per sign-in.
+    # Best-effort; a failure here must never break login.
+    try:
+        _dev_store().record_login_event(user_id)
     except Exception:
         pass
     # First-time flow: no avatar yet -> avatar selection. Returning
@@ -916,6 +998,126 @@ def migrate_history():
                         "note": "Send confirm=true to migrate explicitly."})
     result = _sqlite_store().migrate_session_history(user_id, data.get("exchanges") or [], confirm=True)
     return jsonify(result)
+
+
+@app.route("/api/public/settings")
+def public_settings():
+    """Public, no auth: only the owner-written announcement text.
+    Nothing else from the panel is exposed here."""
+    try:
+        announcement = get_dev_setting(_dev_store(), "announcement", fallback_store=_sqlite_store())
+    except Exception:
+        announcement = ""
+    return jsonify({"announcement": announcement if isinstance(announcement, str) else ""})
+
+
+# -- Developer panel (Phase 1): owner-only analytics + settings --
+def _dev_days():
+    try:
+        days = int(request.args.get("days", "7"))
+    except (TypeError, ValueError):
+        days = 7
+    return max(1, min(90, days))
+
+
+def _require_dev_owner_api():
+    """Return an error response for non-owners, or None when the
+    caller is the owner. Anonymous -> 401, logged-in non-owner -> 403."""
+    if not _session_user_id():
+        return jsonify({"error": "Please sign in first."}), 401
+    if not _is_dev_owner():
+        return jsonify({"error": "Developer panel is restricted to the owner."}), 403
+    return None
+
+
+@app.route("/dev")
+def dev_panel():
+    if not _session_user_id():
+        return redirect("/login")
+    if not _is_dev_owner():
+        return "Developer panel is restricted to the owner.", 403
+    return render_template("dev.html")
+
+
+@app.route("/api/dev/overview")
+def dev_overview():
+    err = _require_dev_owner_api()
+    if err:
+        return err
+    try:
+        store = _dev_store()
+        try:
+            store.prune_events(30)
+        except Exception:
+            pass
+        overview = store.analytics_overview(days=_dev_days())
+        llm = ModelManager().status()
+        return jsonify({**overview,
+                        "store": store_kind(store),
+                        "rag_backend": get_rag_config()["backend"],
+                        "llm_mode": llm.get("mode"),
+                        "llm_model": llm.get("model"),
+                        "settings": get_dev_settings_all(store, fallback_store=_sqlite_store()),
+                        "dev_panel": _dev_panel_enabled()})
+    except Exception as exc:
+        logger.exception("Dev overview failed")
+        return jsonify({"error": str(exc)[:200]}), 502
+
+
+@app.route("/api/dev/top-questions")
+def dev_top_questions():
+    err = _require_dev_owner_api()
+    if err:
+        return err
+    days = _dev_days()
+    return jsonify({"days": days, "top_questions": _dev_store().top_questions(days=days)})
+
+
+@app.route("/api/dev/failed-questions")
+def dev_failed_questions():
+    err = _require_dev_owner_api()
+    if err:
+        return err
+    days = _dev_days()
+    return jsonify({"days": days, "failed_questions": _dev_store().failed_questions(days=days)})
+
+
+@app.route("/api/dev/users")
+def dev_users():
+    err = _require_dev_owner_api()
+    if err:
+        return err
+    return jsonify({"users": _dev_store().recent_users(limit=20)})
+
+
+@app.route("/api/dev/settings", methods=["GET", "POST"])
+def dev_settings():
+    err = _require_dev_owner_api()
+    if err:
+        return err
+    store = _dev_store()
+    if request.method == "GET":
+        return jsonify({"settings": get_dev_settings_all(store, fallback_store=_sqlite_store())})
+    data = request.get_json(silent=True) or {}
+    key = data.get("key")
+    if key not in SETTING_KEYS:
+        return jsonify({"error": "Unknown setting. Allowed: " + ", ".join(sorted(SETTING_KEYS))}), 400
+    value = data.get("value")
+    if isinstance(DEFAULT_SETTINGS[key], bool) and not isinstance(value, bool):
+        return jsonify({"error": f"Setting {key} requires true/false."}), 400
+    if key == "announcement":
+        if not isinstance(value, str):
+            return jsonify({"error": "Setting announcement requires a string."}), 400
+        if len(value) > 500:
+            return jsonify({"error": "Announcement must be 500 characters or fewer."}), 400
+    try:
+        set_dev_setting(store, key, value, fallback_store=_sqlite_store())
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        logger.exception("Dev setting save failed")
+        return jsonify({"error": str(exc)[:200]}), 502
+    return jsonify({"settings": get_dev_settings_all(store, fallback_store=_sqlite_store())})
 
 
 @app.errorhandler(404)
