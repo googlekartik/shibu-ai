@@ -170,7 +170,65 @@ def test_structuring_does_not_repeat_the_definition():
     assert rendered.count(definition) <= 1
 
 
-def test_greeting_and_maths_still_win_over_daily_detection():
+def test_template_plan_never_clashes_with_work_hours():
+    plan = _template_plan("Plan my day: I work 9 to 5, want gym and 1 hour of study")
+    lines = [ln for ln in plan.splitlines() if ln.startswith("- ")]
+    gym_line = [ln for ln in lines if "gym" in ln.lower()][0]
+    assert "09:00" not in gym_line and "12:00" not in gym_line
+    assert any(t in gym_line for t in ("07:00", "18:00", "19:00", "20:00"))
+
+
+def test_daily_error_is_friendly_and_has_no_billing_url(monkeypatch):
+    import services.daily_task_service as daily
+
+    class QuotaManager:
+        mode = "api"
+        model_id = "fake-model"
+
+        def generate(self, *a, **k):
+            return None, ("OpenAI returned HTTP 429: You have no credits remaining. "
+                          "Add credits at https://platform.openai.com/billing/")
+
+    monkeypatch.setattr(daily, "ModelManager", lambda: QuotaManager())
+    out = process_message("Write a polite email to my teacher asking for leave tomorrow", ConversationContext())
+    assert "no credits left" in out["response"]
+    assert "platform.openai.com" not in out["response"] and "http" not in out["response"]
+
+
+def test_howto_web_summary_prefers_real_steps():
+    from services.web_answer import summarise_web_results
+    results = [
+        {"title": "How to Make a Good Cup of Tea: 10 Steps (with Pictures) - wikiHow",
+         "snippet": "This wikiHow article will teach you proper brew times and precise brewing time.",
+         "url": "https://example.com/tea"},
+        {"title": "Perfect tea",
+         "snippet": "Boil fresh water, pour it over the tea leaves and wait for three minutes before serving.",
+         "url": "https://example.com/perfect"},
+    ]
+    summary = summarise_web_results("How to make a cup of tea step by step", results)
+    assert "Boil fresh water" in summary["key_points"][0]
+
+
+def test_explain_paragraph_decomposes_into_structured_blocks():
+    text = ("Machine Learning is a subfield of AI where systems learn patterns from data. "
+            "Examples include spam filters and recommendation systems. "
+            "Common approaches are supervised, unsupervised and reinforcement learning.")
+    blocks = structure(text, {"facts": [], "key_points": [], "definitions": []},
+                       {"content_type": "explain", "level": "intermediate"})
+    kinds = [b["kind"] for b in blocks]
+    assert "callout" in kinds and "list" in kinds
+    assert kinds.count("paragraph") == 0  # the paragraph is decomposed, not repeated
+
+
+def test_quiz_drops_fragment_distractors():
+    from services.content_intent_detector import detect_intent
+    analysis = analyze([
+        {"text": "Machine learning is a field of artificial intelligence.", "source_name": "A"},
+        {"text": "Machine learning is a field of artificial intelligence that learns patterns.", "source_name": "A"},
+    ], "machine learning")
+    quiz = build_quiz(analysis, detect_intent("Quiz me on machine learning"))
+    # Fragments of the same definition must not become fake options.
+    assert quiz is None or all(len(q["options"]) >= 2 for q in quiz["questions"])
     out = process_message("How are you?", ConversationContext())
     assert out["intent"] == "HOW_ARE_YOU"
     out = process_message("25% of 800", ConversationContext())

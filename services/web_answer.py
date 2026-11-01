@@ -18,11 +18,44 @@ No external dependencies, and no LLM is needed for this step.
 from utils.text_processing import clean_text, extract_key_sentences
 
 
+_IMPERATIVE_VERBS = ("boil", "pour", "add", "stir", "heat", "place", "put", "fill",
+                    "wait", "let", "use", "take", "remove", "cover", "steep",
+                    "brew", "mix", "chop", "bake", "cook", "rinse", "dry")
+_META_WORDS = ("wikihow", "article", "will teach", "explains how", "guide explains",
+              "with pictures", "read more", "learn more")
+
+
+def _is_howto_query(query: str) -> bool:
+    low = (query or "").lower()
+    return any(w in low for w in ("how to", "how do i", "how can i", "step by step", "steps to"))
+
+
+def _howto_score(sentence: str) -> int:
+    """Bonus for instructional sentences, penalty for article
+    descriptions: a how-to answer must contain steps to follow,
+    not titles of articles about the task."""
+    low = sentence.lower().strip()
+    score = 0
+    first_word = low.split(" ", 1)[0].strip(".,:;") if low else ""
+    if first_word in _IMPERATIVE_VERBS:
+        score += 3
+    elif any(f" {v} " in f" {low} " for v in _IMPERATIVE_VERBS):
+        score += 1
+    if any(w in low for w in _META_WORDS):
+        score -= 3
+    return score
+
+
 def summarise_web_results(query: str, results, max_points: int = 3):
     """Return {'summary': str, 'key_points': [str]} for search results."""
     snippets = [clean_text(r.get("snippet", "")) for r in results if r.get("snippet")]
     titles = [clean_text(r.get("title", "")) for r in results if r.get("title")]
     points = extract_key_sentences(snippets, query, max_sentences=max_points)
+    if _is_howto_query(query):
+        # Re-rank a wider pool so real steps beat article blurbs.
+        pool = extract_key_sentences(snippets, query, max_sentences=8)
+        pool.sort(key=lambda s: _howto_score(s), reverse=True)
+        points = pool[:max_points]
     if not points and titles:
         # Fall back to titles when snippets are empty fragments.
         points = titles[:max_points]

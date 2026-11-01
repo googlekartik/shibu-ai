@@ -26,14 +26,15 @@ async function renderHistory() {
     const saved = JSON.parse(localStorage.getItem("rb_chat_history") || "[]");
     questions = saved.filter(m => m.role === "user").map(m => m.text);
   } catch (e) {}
-  // Logged-in users: try the persistent SQLite conversation list
-  // first, then fall back to this browser's history.
+  // Logged-in users: merge the persistent SQLite conversation
+  // list with this browser's history, so neither replaces the
+  // other when one of them is empty.
   try {
     const res = await fetch("/api/conversations");
     if (res.ok) {
       const data = await res.json();
       const titles = (data.conversations || []).map(c => c.title).filter(Boolean);
-      if (titles.length) questions = titles;
+      if (titles.length) questions = [...titles, ...questions];
     }
   } catch (e) {}
   // Most recent first, duplicates removed, last 20.
@@ -408,6 +409,13 @@ document.getElementById("logoutBtn").onclick = async () => {
 refreshLoginState();
 
 document.getElementById("detailsBtn").onclick = () => detailsEl.classList.toggle("hidden");
+function resetExplainability() {
+  detailsEl.classList.add("hidden");
+  ["exIntent", "exRule", "exConf", "exAction", "exTool", "exTime"].forEach(id => {
+    const node = document.getElementById(id);
+    if (node) node.textContent = "—";
+  });
+}
 const sidebarEl = document.getElementById("sidebar");
 document.getElementById("sidebarBtn").onclick = () => {
   if (sidebarEl) { sidebarEl.classList.toggle("hidden"); if (!sidebarEl.classList.contains("hidden")) renderHistory(); }
@@ -415,7 +423,7 @@ document.getElementById("sidebarBtn").onclick = () => {
 document.getElementById("newChatBtn").onclick = async () => {
   await fetch("/api/clear", { method: "POST" });
   messagesEl.innerHTML = "";
-  detailsEl.classList.add("hidden");
+  resetExplainability();
   await showWelcomeIfNeeded();
   if (!messagesEl.children.length) addMessage("Hello! I'm Shibu AI. How can I help you today?", "bot");
 };
@@ -423,7 +431,7 @@ document.getElementById("clearBtn").onclick = async () => {
   await fetch("/api/clear", { method: "POST" });
   try { localStorage.removeItem("rb_chat_history"); } catch (e) {}
   messagesEl.innerHTML = "";
-  detailsEl.classList.add("hidden");
+  resetExplainability();
   renderHistory();
   addMessage("Hello! I'm Shibu AI. How can I help you today?", "bot");
 };

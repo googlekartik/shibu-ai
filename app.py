@@ -44,6 +44,11 @@ from utils.security import MAX_PDF_TEXT_LENGTH, validate_message
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
+# Static JS/CSS must never be served stale after a redeploy: the
+# browser profile that tested the previous build kept the old
+# app.js and hid the sidebar/Clear fixes. No caching, revalidate
+# every load (small files, personal app).
+app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
 app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024  # 2 MB request limit
 CORS(app)
 

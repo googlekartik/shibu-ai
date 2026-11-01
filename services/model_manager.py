@@ -283,6 +283,16 @@ class ModelManager:
             text, err = svc.generate(messages, max_tokens=max_new_tokens, temperature=temperature)
             if text:
                 self.effective_model = self.model_id
+                return text, err
+            # Second chance: an OpenAI quota/rate-limit error should
+            # not kill the answer outright when a Hugging Face token
+            # is also configured. Only then is the HF router tried;
+            # if it also fails, the original OpenAI error is returned
+            # so the failure is never mislabelled.
+            if err and self.token:
+                hf_text, _hf_err = self._generate_api(messages, max_new_tokens, temperature)
+                if hf_text:
+                    return hf_text, None
             return text, err
         if self.mode == "api":
             return self._generate_api(messages, max_new_tokens, temperature)

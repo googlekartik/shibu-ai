@@ -490,3 +490,45 @@ with a task-specific prompt; the rule engine is skipped for them.
   also fails (unit-tested), maths 49933 still works, "How are you?" still
   greets. A real model-drafted plan/email/howto on the live site still needs
   confirming after a merge + Render redeploy.
+
+## 30. Continuous-improvement fixes, round 1 (2026-11-01, pushed under Kartik's continuous-improvement instruction)
+
+Live test of commit cf23c0fe on y3m2 (anonymous, 16:16-16:19 IST) found: OpenAI
+returned HTTP 429 "no credits remaining" (all LLM drafts fell back to
+templates/web); the tea web answer listed article descriptions instead of
+steps; the template plan put gym at 09:00 inside the 9-to-5 work block;
+"Explain machine learning" rendered as one flat paragraph; the Chats
+sidebar did not show the session's questions and Clear did not hide the
+Details panel (the browser profile had cached the previous app.js).
+
+- **ModelManager** (`services/model_manager.py`): on an OpenAI error, if an
+  HF token is also configured, the Hugging Face router is tried as a second
+  chance; if it also fails, the original OpenAI error is returned. No HF
+  token means no wasted HF attempt. This only helps if HF_TOKEN is set in
+  Render Environment; it does not fix the OpenAI credits problem itself.
+- **Daily tasks** (`services/daily_task_service.py`): provider errors are
+  shortened for users (quota errors say the model's account has no credits
+  left; billing URLs and raw API text are never shown). Template plans now
+  place unscheduled activities before/after a stated work range instead of
+  inside it.
+- **Web how-tos** (`services/web_answer.py`): how-to queries re-rank a
+  wider pool of sentences, boosting imperative steps (boil, pour, wait)
+  and penalising article descriptions (wikiHow, "will teach you").
+- **Structuring** (`services/content_structuring_engine.py`): a short
+  explain paragraph with no analysed key points is decomposed into a
+  Definition callout + Key points list instead of one flat paragraph.
+  Workflow flowchart nodes now use short overview labels, not the full
+  steps text repeated.
+- **Quiz** (`services/interactive_component_renderer.py`): distractors
+  that mostly repeat the answer sentence's words are dropped, so a quiz
+  cannot be built from fragments of its own answer.
+- **Frontend caching** (`app.py`): `SEND_FILE_MAX_AGE_DEFAULT = 0`, so
+  static JS/CSS are revalidated on every load and a redeploy can never
+  leave a stale app.js in the browser. Sidebar history now merges server
+  conversations with browser history instead of one replacing the other;
+  Clear / New chat reset the Details panel contents as well as hiding it.
+- **Tests**: 139 pytest passed (132 + 3 model-fallback + 4 new daily-task
+  checks). Live Flask (no keys): ML explain now returns heading +
+  Definition + Key points blocks; static JS serves `Cache-Control:
+  no-cache, max-age=0`. Still needs Kartik: OpenAI credits (or an HF
+  token in Render) before any live model-drafted answer can work.

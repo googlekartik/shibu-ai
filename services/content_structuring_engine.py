@@ -168,6 +168,19 @@ def structure(response_text: str, analysis: dict, intent: dict, sources: list = 
         if key_points:
             blocks.append({"kind": "list", "title": "Key points", "items": key_points[:6]})
             used.update(_norm_key(p) for p in key_points)
+        elif not any(b.get("kind") == "callout" for b in blocks):
+            # A short rule/RAG paragraph with no analysed key points
+            # and no definition callout already shown still deserves
+            # structure: split it into a definition callout and key
+            # points instead of one flat paragraph.
+            sentences = _sentences_from(intro_text)
+            if len(sentences) >= 2 and blocks and blocks[-1].get("kind") == "paragraph":
+                blocks.pop()
+                first = sentences[0]
+                title = "Definition" if re.search(r"\bis (a|an|the)\b|\bare\b", first, re.I) else "Overview"
+                blocks.append({"kind": "callout", "title": title, "text": first})
+                blocks.append({"kind": "list", "title": "Key points", "items": sentences[1:6]})
+                used.update(_norm_key(s) for s in sentences)
         if analysis.get("examples"):
             blocks.append({"kind": "list", "title": "Examples",
                            "items": [e["text"] for e in analysis["examples"][:4]]})

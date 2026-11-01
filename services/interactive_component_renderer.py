@@ -29,6 +29,14 @@ def _deterministic_order(items: list, seed: str) -> list:
     return [item for _key, item in sorted(keyed)]
 
 
+def _word_overlap(a: str, b: str) -> float:
+    words_a = set(re.findall(r"[a-z]+", (a or "").lower()))
+    words_b = set(re.findall(r"[a-z]+", (b or "").lower()))
+    if not words_a or not words_b:
+        return 0.0
+    return len(words_a & words_b) / max(1, min(len(words_a), len(words_b)))
+
+
 def build_quiz(analysis: dict, intent: dict) -> dict | None:
     if not intent.get("needs_interactive") and intent.get("level") != "exam":
         return None
@@ -46,7 +54,13 @@ def build_quiz(analysis: dict, intent: dict) -> dict | None:
                 distractors.append(m)
         for fact in facts:
             candidate = " ".join(fact.split()[:10]).strip(" .")
-            if candidate and candidate not in distractors and candidate != meaning:
+            # A distractor must be a different statement, not a
+            # fragment of the answer sentence itself: fragments
+            # that mostly repeat the answer's words are dropped,
+            # and a question left with one option is not shown.
+            if not candidate or _word_overlap(candidate, meaning) >= 0.5:
+                continue
+            if candidate not in distractors:
                 distractors.append(candidate)
             if len(distractors) >= 3:
                 break

@@ -81,6 +81,17 @@ def _context_lines(context) -> list:
         return []
 
 
+def _friendly_error(err: str) -> str:
+    """Provider errors shown to users must be short and must never
+    contain a billing URL or raw API text."""
+    text = (err or "").strip()
+    low = text.lower()
+    if "429" in text or "no credits" in low or "insufficient_quota" in low or "quota" in low:
+        return "the language model's account has no credits left"
+    text = re.sub(r"https?://\S+", "", text).strip()
+    return text[:120] or "the language model returned nothing"
+
+
 def _llm_draft(kind: str, message: str, context) -> tuple:
     """Return (text, error, model_id). error is 'off' when no model
     is enabled, so the caller can choose the labelled fallback."""
@@ -95,8 +106,28 @@ def _llm_draft(kind: str, message: str, context) -> tuple:
                 {"role": "user", "content": message}]
     raw, err = manager.generate(messages, max_new_tokens=400, temperature=0.5)
     if err or not raw:
-        return None, (err or "The language model returned nothing."), None
+        return None, _friendly_error(err or "The language model returned nothing."), None
     return raw.strip(), None, (getattr(manager, "effective_model", None) or manager.model_id)
+
+
+def _work_range_hours(message: str):
+    """(start_hour_24, end_hour_24) for a stated work range like
+    '9 to 5', assuming 9am-5pm when no am/pm is given. None when
+    no range is stated."""
+    match = _TIME_RE.search(message or "")
+    if not match:
+        return None
+    start, end = int(match.group(1)), int(match.group(4))
+    start_ampm, end_ampm = (match.group(3) or "").lower(), (match.group(6) or "").lower()
+    if not start_ampm and not end_ampm and start <= 12 and end <= 12 and end < start:
+        start_ampm, end_ampm = "am", "pm"
+    def to24(hour, ampm):
+        if ampm == "pm" and hour < 12:
+            return hour + 12
+        if ampm == "am" and hour == 12:
+            return 0
+        return hour
+    return to24(start, start_ampm), to24(end, end_ampm)
 
 
 def _template_plan(message: str) -> str:
@@ -117,8 +148,14 @@ def _template_plan(message: str) -> str:
     if not activities:
         activities = ["Work", "Break", "Study"]
     lines = ["Your day plan (template — the language model is not available, so times marked suggested are suggestions):", ""]
-    suggested = ["07:00", "09:00", "12:00", "15:00", "18:00", "20:00"]
-    range_match = _TIME_RE.search(message)
+    work = _work_range_hours(message)
+    # Suggested slots must never clash with a stated work range:
+    # activities without a given time go before work or after it.
+    pool = ["07:00", "12:00", "18:00", "19:00", "20:00"]
+    if work:
+        def _hour(slot):
+            return int(slot.split(":")[0])
+        pool = [s for s in pool if _hour(s) < work[0] or _hour(s) >= work[1]] or ["07:00", "20:00"]
     slots = []
     for chunk in activities:
         slot_match = _TIME_RE.search(chunk)
@@ -133,7 +170,7 @@ def _template_plan(message: str) -> str:
             if single:
                 chunk = _SINGLE_TIME_RE.sub("", chunk).strip(" .")
         chunk = re.sub(r"(?i)^(plan my \w+|i work|want|i have)\s*", "", chunk).strip()
-        slots.append((slot or suggested[len(slots)] + " (suggested)", chunk[:80] or "Activity"))
+        slots.append((slot or pool[len(slots) % len(pool)] + " (suggested)", chunk[:80] or "Activity"))
     for slot, activity in slots[:6]:
         lines.append(f"- {slot}: {activity}")
     return "\n".join(lines)

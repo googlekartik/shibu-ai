@@ -44,12 +44,17 @@ def _flowchart_from_blocks(blocks: list, content_type: str) -> dict | None:
         if block.get("kind") == "steps" and len(block.get("items", [])) >= 2:
             nodes = []
             for i, item in enumerate(block["items"][:10]):
+                # Short overview labels only: the full text already
+                # lives in the steps list, so the flowchart must
+                # not repeat it word for word.
+                words = str(item).split()
+                label = " ".join(words[:6]) + (" …" if len(words) > 6 else "")
                 node_type = "decision" if re.search(r"\bif\b", item, re.I) else "process"
                 if i == 0:
                     node_type = "start"
                 elif i == len(block["items"]) - 1:
                     node_type = "end"
-                nodes.append({"label": item[:120], "type": node_type})
+                nodes.append({"label": label[:60], "type": node_type})
             return {"kind": "flowchart", "title": "Workflow", "nodes": nodes}
     return None
 
