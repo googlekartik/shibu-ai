@@ -127,6 +127,22 @@ def _save_chat_to_sqlite(user_message, payload):
             logger.exception("SQLite memory save failed (chat still returned)")
 
 
+def _attach_presentation(message, payload, ctx):
+    """Add structured presentation blocks to a finished payload.
+
+    Graceful fallback: any pipeline failure leaves the original
+    payload untouched, so presentation can never break chat.
+    """
+    try:
+        from services.content_processing_engine import process_presentation
+        presentation = process_presentation(message, payload, context=ctx)
+        if presentation:
+            payload["presentation"] = presentation
+    except Exception:
+        logger.exception("Content presentation failed (plain answer returned)")
+    return payload
+
+
 def _restore_context(ctx, user_id, display_name=""):
     """First logged-in chat in a session: load explicit memories and
     the most recent saved conversation into the in-memory context,
@@ -399,6 +415,7 @@ def chat():
                             "backend": _rag["backend"], "processing_ms": round(timer.elapsed_ms(), 1)}
                 _payload["response"] = _response
                 _payload["tool"] = _tool
+                _attach_presentation(message_or_error, _payload, ctx)
                 ctx.add_exchange(message_or_error, _payload["response"], "RAG_ANSWER", "rag_answer", 0.85)
                 _save_chat_to_sqlite(message_or_error, _payload)
                 return jsonify(_payload)
@@ -434,6 +451,7 @@ def chat():
                     "action": "Answer from cache", "sources": hit.get("sources", []),
                     "cached": True, "processing_ms": round(timer.elapsed_ms(), 1),
                 }
+                _attach_presentation(message_or_error, payload, ctx)
                 return jsonify(payload)
     try:
         payload = process_message(message_or_error, ctx, processing_ms=0.0)
@@ -457,6 +475,7 @@ def chat():
             except Exception:
                 pass
         _save_chat_to_sqlite(message_or_error, payload)
+        _attach_presentation(message_or_error, payload, ctx)
         return jsonify(payload)
     except Exception as exc:
         logger.exception("Chat failed")

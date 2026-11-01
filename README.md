@@ -398,3 +398,58 @@ button, no LLM polishing of rule answers, no auto-learning.
   tests/test_memory_smarter_2026.py). Live Flask: / 200,
   /api/rag/status sqlite, remember/list in one session 200,
   maths + cross-session running total 1017397 verified in tests.
+
+## 28. Intelligent Content Processing & Visual Presentation Engine (2026-11-01, local only — NOT pushed to GitHub)
+
+Pipeline (Understand -> Retrieve -> Analyze -> Verify -> Organize -> Visualize -> Respond),
+implemented as ten modules in `services/`, orchestrated by `services/content_processing_engine.py`
+(`process_presentation`). It re-presents an answer the existing router/RAG/web pipeline already
+produced; it does not re-retrieve, re-call a model, or rewrite wording. Any pipeline failure
+leaves the original plain payload untouched.
+
+- **ContentIntentDetector** (`content_intent_detector.py`): explain, compare, process_steps,
+  algorithm, maths, code, web_search, document_summary, statistics, roadmap, historical,
+  pros_cons, quiz, simple. Level: beginner/intermediate/advanced/exam/professional from the
+  request words and the existing tone/level preferences.
+- **SourceRetrievalManager** (`source_retrieval_manager.py`): organises already-retrieved
+  material (payload sources, parsed web sources, the uploaded document in context) with
+  metadata intact. No new network calls, no new API costs.
+- **ContentExtractionEngine** (`content_extraction_engine.py`): cleans retrieved text
+  (HTML, boilerplate, duplicate sentences), splits Markdown/heading/list sections.
+- **IntelligentContentAnalyzer** (`intelligent_content_analyzer.py`): definitions, examples,
+  statistics, conclusions, contradictions (same figure, different values, different sources
+  are flagged, never merged), uncertainties, missing information.
+- **FactVerificationEngine** (`fact_verification_engine.py`): corroborated (2+ sources),
+  single_source, internal (rule knowledge base), unverified (no source). Never invents a fact.
+- **ContentStructuringEngine** (`content_structuring_engine.py`): section choice by content
+  type — intro, definition callout, key points, steps, comparison table, pros/cons,
+  timeline, section-wise document summary, statistics table. Simple questions stay one paragraph.
+- **VisualResponseGenerator** (`visual_response_generator.py`): bar chart from numeric table
+  rows (2+ values only), flowchart from steps, image gallery only from sources that carry
+  an image URL (none do today, so none is fabricated).
+- **InteractiveComponentRenderer** (`interactive_component_renderer.py`): quiz MCQs and
+  flashcards only when requested or for exam prep, built deterministically from retrieved
+  definitions/facts; expandable disclosure for long paragraphs.
+- **CitationManager** (`citation_manager.py`): S/W citation labels carried over from real
+  sources, parsed back from formatted web answers, and validated — a citation with no
+  matching source is dropped, never fabricated.
+- **ResponseQualityController** (`response_quality_controller.py`): drops empty/duplicate/
+  over-long blocks, enforces the simple/raw plain-text rule, falls back to the plain answer
+  if structuring produced almost nothing for a long answer.
+- **Frontend** (`static/js/app.js`, `static/css/style.css`): safe DOM-only block renderer
+  (textContent, never innerHTML) for headings, paragraphs, callouts, lists, steps, tables,
+  pros/cons, code, equations, canvas bar charts, timelines, flowcharts, quizzes,
+  flashcards and expandables, in the existing black theme. No new libraries. The plain
+  `response` text is unchanged, so API clients, Copy, history and the Details panel work
+  as before; `payload.presentation` carries `{content_type, level, blocks, citations,
+  verification, visual_kinds}`.
+- **Not implemented**: token streaming. `ModelManager` (OpenAI/HF) is single-shot, so
+  streaming would require changing the model clients and the frontend send path; the
+  existing "Thinking…" indicator is kept instead. PPTX upload is also not added (PPTX is
+  output-only; upload supports PDF, DOCX, XLSX, TXT, MD, HTML, CSV).
+- **Tests**: 122 pytest passed (104 previous + 14 new in
+  tests/test_content_presentation_2026.py + 4 training-pipeline tests, after syncing this
+  workspace to GitHub head 280c5e5b and adding the zip's training template files alongside
+  the local GPU-training package). Live Flask: / 200, /api/health 200, ML explain and
+  compare answers carry presentation blocks, maths returns no presentation, running total
+  49933 -> 1017397 still works.

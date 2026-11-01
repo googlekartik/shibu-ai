@@ -47,12 +47,175 @@ async function renderHistory() {
   });
 }
 
+// Structured presentation blocks (from the content-processing
+// pipeline). Rendered only with safe DOM calls: block text is
+// always textContent, never innerHTML, so model/web text cannot
+// inject markup. If blocks are absent or invalid, the caller
+// falls back to the plain-text body below.
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined && text !== null) node.textContent = text;
+  return node;
+}
+
+function drawBarChart(canvas, labels, values) {
+  const ctx = canvas.getContext("2d");
+  if (!ctx || !values.length) return;
+  const W = canvas.width, H = canvas.height, pad = 28;
+  const max = Math.max(...values, 1);
+  const barW = Math.min(48, (W - pad * 2) / values.length - 10);
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = "#7c5cff";
+  values.forEach((v, i) => {
+    const h = (v / max) * (H - pad * 2 - 18);
+    const x = pad + i * ((W - pad * 2) / values.length) + 6;
+    ctx.fillRect(x, H - pad - h, barW, h);
+    ctx.fillStyle = "#e6e6e6";
+    ctx.font = "11px system-ui, sans-serif";
+    ctx.fillText(String(v), x, H - pad - h - 5);
+    ctx.fillText((labels[i] || "").slice(0, 16), x, H - 10);
+    ctx.fillStyle = "#7c5cff";
+  });
+}
+
+function renderBlocks(blocks, container) {
+  blocks.forEach(block => {
+    if (!block || !block.kind) return;
+    if (block.kind === "heading") {
+      container.appendChild(el(block.level === 3 ? "h4" : "h3", "pres-heading", block.text));
+    } else if (block.kind === "paragraph") {
+      if (block.expandable && typeof block.text === "string" && block.text.length > 450) {
+        const cut = block.text.indexOf(". ", 40);
+        const details = document.createElement("details");
+        details.className = "pres-details";
+        const summary = document.createElement("summary");
+        summary.textContent = cut > 0 ? block.text.slice(0, cut + 1) : block.text.slice(0, 120);
+        details.appendChild(summary);
+        details.appendChild(el("p", "", cut > 0 ? block.text.slice(cut + 2) : block.text));
+        container.appendChild(details);
+      } else {
+        container.appendChild(el("p", "pres-para", block.text));
+      }
+    } else if (block.kind === "callout") {
+      const box = el("div", "pres-callout");
+      if (block.title) box.appendChild(el("strong", "", block.title + ": "));
+      box.appendChild(document.createTextNode(block.text || ""));
+      container.appendChild(box);
+    } else if (block.kind === "list" || block.kind === "steps") {
+      if (block.title) container.appendChild(el("div", "pres-subtitle", block.title));
+      const list = document.createElement(block.kind === "steps" ? "ol" : "ul");
+      list.className = block.kind === "steps" ? "pres-steps" : "pres-list";
+      (block.items || []).forEach(item => list.appendChild(el("li", "", item)));
+      container.appendChild(list);
+    } else if (block.kind === "table") {
+      if (block.title) container.appendChild(el("div", "pres-subtitle", block.title));
+      const table = document.createElement("table");
+      table.className = "pres-table";
+      if (block.headers) {
+        const head = document.createElement("tr");
+        block.headers.forEach(h => head.appendChild(el("th", "", h)));
+        table.appendChild(head);
+      }
+      (block.rows || []).forEach(row => {
+        const tr = document.createElement("tr");
+        row.forEach(cell => tr.appendChild(el("td", "", cell)));
+        table.appendChild(tr);
+      });
+      container.appendChild(table);
+    } else if (block.kind === "pros_cons") {
+      const wrap = el("div", "pres-pros-cons");
+      const pros = el("div", "pres-pros"); pros.appendChild(el("div", "pres-subtitle", "Advantages"));
+      const prosList = document.createElement("ul"); (block.pros || []).forEach(i => prosList.appendChild(el("li", "", i))); pros.appendChild(prosList);
+      const cons = el("div", "pres-cons"); cons.appendChild(el("div", "pres-subtitle", "Disadvantages"));
+      const consList = document.createElement("ul"); (block.cons || []).forEach(i => consList.appendChild(el("li", "", i))); cons.appendChild(consList);
+      wrap.appendChild(pros); wrap.appendChild(cons); container.appendChild(wrap);
+    } else if (block.kind === "code") {
+      const pre = document.createElement("pre"); pre.className = "pres-code";
+      pre.appendChild(el("code", "", block.text)); container.appendChild(pre);
+    } else if (block.kind === "equation") {
+      container.appendChild(el("div", "pres-equation", block.text));
+    } else if (block.kind === "chart") {
+      if (block.title) container.appendChild(el("div", "pres-subtitle", block.title));
+      const canvas = document.createElement("canvas");
+      canvas.className = "pres-chart"; canvas.width = 560; canvas.height = 200;
+      container.appendChild(canvas);
+      drawBarChart(canvas, block.labels || [], block.values || []);
+    } else if (block.kind === "timeline") {
+      if (block.title) container.appendChild(el("div", "pres-subtitle", block.title));
+      const wrap = el("div", "pres-timeline");
+      (block.events || []).forEach(ev => {
+        const row = el("div", "pres-timeline-row");
+        row.appendChild(el("span", "pres-year", ev.year));
+        row.appendChild(el("span", "", ev.text));
+        wrap.appendChild(row);
+      });
+      container.appendChild(wrap);
+    } else if (block.kind === "flowchart") {
+      if (block.title) container.appendChild(el("div", "pres-subtitle", block.title));
+      const wrap = el("div", "pres-flow");
+      (block.nodes || []).forEach((node, i) => {
+        if (i) wrap.appendChild(el("div", "pres-arrow", "↓"));
+        wrap.appendChild(el("div", "pres-node pres-node-" + (node.type || "process"), node.label));
+      });
+      container.appendChild(wrap);
+    } else if (block.kind === "gallery") {
+      const wrap = el("div", "pres-gallery");
+      (block.images || []).forEach(img => {
+        if (typeof img.url === "string" && /^https?:\/\//.test(img.url)) {
+          const image = document.createElement("img");
+          image.src = img.url; image.alt = img.caption || "Image"; image.loading = "lazy";
+          wrap.appendChild(image);
+        }
+      });
+      if (wrap.children.length) container.appendChild(wrap);
+    } else if (block.kind === "quiz") {
+      if (block.title) container.appendChild(el("div", "pres-subtitle", block.title));
+      (block.questions || []).forEach(q => {
+        const qWrap = el("div", "pres-quiz");
+        qWrap.appendChild(el("div", "pres-quiz-q", q.question));
+        const feedback = el("div", "pres-quiz-feedback");
+        (q.options || []).forEach((opt, i) => {
+          const b = document.createElement("button");
+          b.type = "button"; b.className = "pres-quiz-opt"; b.textContent = opt;
+          b.onclick = () => {
+            const correct = i === q.answer_index;
+            b.classList.add(correct ? "correct" : "wrong");
+            feedback.textContent = (correct ? "Correct. " : "Not quite. ") + (q.explanation || "");
+            [...qWrap.querySelectorAll("button")].forEach(btn => { btn.disabled = true; });
+          };
+          qWrap.appendChild(b);
+        });
+        qWrap.appendChild(feedback);
+        container.appendChild(qWrap);
+      });
+    } else if (block.kind === "flashcards") {
+      if (block.title) container.appendChild(el("div", "pres-subtitle", block.title));
+      (block.cards || []).forEach(card => {
+        const b = document.createElement("button");
+        b.type = "button"; b.className = "pres-card"; b.textContent = card.front;
+        let showingBack = false;
+        b.onclick = () => { showingBack = !showingBack; b.textContent = showingBack ? card.back : card.front; };
+        container.appendChild(b);
+      });
+    }
+  });
+}
+
 function addMessage(text, role, extra, saveHistory = true) {
   if (saveHistory) saveToHistory(text, role);
   const div = document.createElement("div");
   div.className = "msg " + role;
   const body = document.createElement("div");
-  body.textContent = text;
+  const presentation = role === "bot" && extra && extra.presentation;
+  if (presentation && Array.isArray(presentation.blocks) && presentation.blocks.length) {
+    renderBlocks(presentation.blocks, body);
+    if (presentation.verification && presentation.verification.summary) {
+      body.appendChild(el("div", "pres-verification", "Checked against sources: " + presentation.verification.summary));
+    }
+  } else {
+    body.textContent = text;
+  }
   div.appendChild(body);
   // AI Environment Properties: rendered as a separate table below the
   // main answer (never mixed into it), when the server classified a
