@@ -312,11 +312,15 @@ def test_r4_pinecone_and_sqlite_fail_means_not_covered(monkeypatch):
     assert "Pinecone" not in json.dumps(result)
 
 
-def test_r4_rag_status_exposes_pinecone_error_field():
+def test_r4_rag_status_exposes_pinecone_error_field(monkeypatch, tmp_path):
     """pinecone_error is present on /api/rag/status in every
-    backend mode, with only endpoint + status when set."""
+    backend mode. With no failure recorded (isolated durable
+    sidecar + cleared process memory) it is None; when set it
+    carries endpoint + status plus structure-only context (field
+    names, query type, exception class) — never values or keys."""
     import services.vector_store as vs
     vs._LAST_PINECONE_DIAGNOSTIC.clear()
+    monkeypatch.setenv("SHIBU_DIAGNOSTIC_DIR", str(tmp_path))
     data = app_module.app.test_client().get("/api/rag/status").get_json()
     assert "pinecone_error" in data
     assert data["pinecone_error"] is None
@@ -439,9 +443,9 @@ def test_r4_quiz_fragment_never_in_key_points():
     process_message("Compare Python and JavaScript", ctx)
     quiz = process_message("Give me a quiz on that comparison", ctx)
     assert quiz["rule_id"] == "comparison_quiz"
+    # Round 5 (Q1): quiz payloads are exempt from presentation, so
+    # the quiz text can never be re-split into key-points blocks
+    # or fragment flashcards — it renders exactly as built.
     presentation = process_presentation("Give me a quiz on that comparison", quiz, ctx)
-    assert presentation is not None
-    assert "Quiz on the comparison" not in json.dumps(presentation["blocks"])
-    key_points = [b for b in presentation["blocks"] if b.get("kind") == "key_points"]
-    for block in key_points:
-        assert "Quiz on the comparison" not in json.dumps(block)
+    assert presentation is None
+    assert quiz["response"].count("Quiz on the comparison:") == 1

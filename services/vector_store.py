@@ -36,18 +36,42 @@ from services.retry import retry_cloud_call
 _LAST_PINECONE_DIAGNOSTIC: dict = {}
 
 
-def _record_pinecone_diagnostic(endpoint: str, status) -> None:
+def _record_pinecone_diagnostic(endpoint: str, status, extra: dict = None) -> None:
+    """Record a Pinecone failure diagnostic: endpoint + HTTP status
+    ONLY, plus structure-only context when given (discovered schema
+    field names, the text field chosen, the query type used, the
+    exception class name). No values, no payload, no key. A durable
+    copy is kept beside the SQLite database so the diagnostic
+    survives a process restart (see services/diagnostic_store)."""
     _LAST_PINECONE_DIAGNOSTIC.clear()
     try:
         status = int(status) if status is not None else None
     except (TypeError, ValueError):
         status = None
     _LAST_PINECONE_DIAGNOSTIC.update({"endpoint": endpoint, "status": status})
+    if isinstance(extra, dict):
+        for key in ("schema_fields", "text_field", "query_type", "error_type"):
+            if extra.get(key) is not None:
+                _LAST_PINECONE_DIAGNOSTIC[key] = extra[key]
+    try:
+        from services.diagnostic_store import write_diagnostic
+        write_diagnostic("pinecone", dict(_LAST_PINECONE_DIAGNOSTIC))
+    except Exception:
+        pass
 
 
 def pinecone_last_diagnostic() -> dict | None:
-    """Copy of the last Pinecone failure diagnostic, or None."""
-    return dict(_LAST_PINECONE_DIAGNOSTIC) or None
+    """Copy of the last Pinecone failure diagnostic, or None.
+
+    Process memory first, then the durable sidecar (a fresh
+    process after a restart)."""
+    if _LAST_PINECONE_DIAGNOSTIC:
+        return dict(_LAST_PINECONE_DIAGNOSTIC)
+    try:
+        from services.diagnostic_store import read_diagnostic
+        return read_diagnostic("pinecone")
+    except Exception:
+        return None
 
 
 def _failure_status(exc: Exception):
@@ -73,11 +97,41 @@ def _field_attr(spec, name):
     return getattr(spec, name, None)
 
 
+def _normalise_field_spec(spec) -> dict:
+    """One schema field spec (dict or object form) -> the flags the
+    Documents API decisions need. The SDK reports fields keyed by
+    name with the search configuration as nested keys
+    ({"type": "string", "embed": {...}}), while older/list shapes
+    carry an "aspect" ("embed", "full_text_search", "semantic_text")
+    and a "name". Both are accepted; a legacy "semantic_text" field
+    is flagged separately because it needs the legacy Records API,
+    not documents.*. "store_text" defaults to True when absent."""
+    ftype = _field_attr(spec, "type")
+    aspect = _field_attr(spec, "aspect")
+    kind = aspect or ftype
+    embed = bool(_field_attr(spec, "embed")) or kind == "embed"
+    sparse_embed = bool(_field_attr(spec, "sparse_embed")) or kind == "sparse_embed"
+    full_text_search = bool(_field_attr(spec, "full_text_search")) or (
+        isinstance(kind, str) and "full_text_search" in kind)
+    semantic_text = kind == "semantic_text"
+    resolved_type = ftype
+    if resolved_type is None:
+        if semantic_text:
+            resolved_type = "semantic_text"
+        elif embed or sparse_embed or full_text_search:
+            resolved_type = "string"
+    return {"type": resolved_type, "embed": embed, "sparse_embed": sparse_embed,
+            "full_text_search": full_text_search, "semantic_text": semantic_text,
+            "store_text": _field_attr(spec, "store_text")}
+
+
 def _parse_schema_fields(schema) -> dict:
     """Normalise a describe() schema to {field: {type, embed,
-    full_text_search}}. Accepts the SDK dict form
-    ({"fields": {...}}) and object forms with a .fields mapping.
-    Anything unrecognised yields {} — callers fall back to "text"."""
+    sparse_embed, full_text_search, semantic_text, store_text}}.
+    Accepts the SDK dict form ({"fields": {name: spec}}) and
+    object forms with a .fields mapping, and list forms
+    ([{"name": ..., "aspect": ...}]). Anything unrecognised yields
+    {} — callers fall back to "text"."""
     fields = None
     if isinstance(schema, dict):
         fields = schema.get("fields")
@@ -86,13 +140,35 @@ def _parse_schema_fields(schema) -> dict:
     out = {}
     if isinstance(fields, dict):
         for name, spec in fields.items():
-            out[str(name)] = {
-                "type": _field_attr(spec, "type"),
-                "embed": bool(_field_attr(spec, "embed")),
-                "sparse_embed": bool(_field_attr(spec, "sparse_embed")),
-                "full_text_search": bool(_field_attr(spec, "full_text_search")),
-            }
+            out[str(name)] = _normalise_field_spec(spec)
+    elif isinstance(fields, list):
+        for spec in fields:
+            name = _field_attr(spec, "name") or _field_attr(spec, "field") or _field_attr(spec, "key")
+            if name:
+                out[str(name)] = _normalise_field_spec(spec)
     return out
+
+
+def _schema_field_names(schema_fields: dict) -> list:
+    """Discovered schema field names only (structure, never values),
+    for the pinecone_error diagnostic."""
+    return sorted(str(name) for name in (schema_fields or {}).keys())
+
+
+def _searchable_text_fields(schema_fields: dict) -> tuple:
+    """(embed field name or None, [full-text-searchable field names])
+    for a document-schema index. A full-text field with
+    store_text=False cannot be TextQuery-searched (the server
+    rejects it with a 400), so it is excluded."""
+    embed_field = None
+    fts_fields = []
+    for name, spec in (schema_fields or {}).items():
+        if spec.get("type") == "string" and spec.get("embed") and embed_field is None:
+            embed_field = name
+        if (spec.get("type") == "string" and spec.get("full_text_search")
+                and spec.get("store_text") is not False):
+            fts_fields.append(name)
+    return embed_field, fts_fields
 
 
 def _schema_text_field(schema_fields: dict) -> str:
@@ -150,6 +226,38 @@ def _match_fields(match, text_field: str) -> dict:
         except Exception:
             pass
     return out
+
+
+def _filter_targets_data_field(filt: dict, schema_fields: dict) -> bool:
+    """True when a $eq filter names a field the schema declares as
+    searchable data (embed / sparse_embed / full_text_search /
+    vector / semantic_text). The server refuses comparison
+    operators on such fields with a 400; metadata/undeclared
+    fields take $eq fine."""
+    if not filt or not schema_fields:
+        return False
+    for key in filt:
+        spec = schema_fields.get(key)
+        if not spec:
+            continue
+        if (spec.get("embed") or spec.get("sparse_embed")
+                or spec.get("full_text_search") or spec.get("semantic_text")
+                or spec.get("type") in ("dense_vector", "sparse_vector")):
+            return True
+    return False
+
+
+def _match_satisfies_filter(match: dict, filt: dict) -> bool:
+    """Client-side equality for a filter withheld from the server
+    (see _filter_targets_data_field): only $eq clauses are
+    applied; anything else passes the match through rather than
+    dropping it on a guess."""
+    metadata = match.get("metadata") or {}
+    for key, clause in (filt or {}).items():
+        if isinstance(clause, dict) and set(clause) == {"$eq"}:
+            if metadata.get(key) != clause["$eq"]:
+                return False
+    return True
 
 
 def _parse_document_match(match, text_field: str) -> dict:
@@ -288,16 +396,29 @@ class PineconeVectorStore:
             return self._index
         return self._connect()
 
-    def _documents_call(self, endpoint: str, operation, attempts: int = 3):
+    def _documents_call(self, endpoint: str, operation, attempts: int = 3, diag: dict = None):
         """Run one Documents API operation with transient retries.
         A failure records the endpoint + HTTP status diagnostic
-        (safe for /api/rag/status) and is re-raised as PineconeError
-        with the server message truncated — never raw payload."""
+        (safe for /api/rag/status) plus structure-only context
+        (schema field names, text field, query type, exception
+        class) when given, and is re-raised as PineconeError with
+        the server message truncated — never raw payload."""
         try:
             return retry_cloud_call(operation, attempts=attempts)
         except Exception as exc:
-            _record_pinecone_diagnostic(endpoint, _failure_status(exc))
+            extra = dict(diag or {})
+            extra["error_type"] = type(exc).__name__
+            _record_pinecone_diagnostic(endpoint, _failure_status(exc), extra)
             raise PineconeError(f"Pinecone documents {endpoint.split('/')[-1]} failed: {exc}"[:300]) from exc
+
+    def _documents_diag(self, query_type: str) -> dict:
+        """Structure-only context for the pinecone_error diagnostic:
+        discovered schema field names + the text field chosen +
+        the query type. Never values, keys, or payload."""
+        schema_fields = getattr(self, "_schema_fields", None) or {}
+        return {"schema_fields": _schema_field_names(schema_fields),
+                "text_field": getattr(self, "_text_field", None) or "text",
+                "query_type": query_type}
 
     def _documents_upsert(self, namespace: str, items: list, attempts: int = 3) -> int:
         index = self._documents_index()
@@ -320,7 +441,7 @@ class PineconeVectorStore:
             self._documents_call(
                 "documents/upsert",
                 lambda batch=batch: index.documents.upsert(namespace=namespace, documents=batch),
-                attempts=attempts)
+                attempts=attempts, diag=self._documents_diag("upsert"))
         return len(items)
 
     def _documents_search(self, namespace: str, query_text: str, top_k: int,
@@ -328,26 +449,69 @@ class PineconeVectorStore:
         index = self._documents_index()
         text_field = self._text_field_name()
         schema_fields = getattr(self, "_schema_fields", None) or {}
-        spec = schema_fields.get(text_field) or {}
-        if spec.get("embed"):
+        embed_field, fts_fields = _searchable_text_fields(schema_fields)
+        if embed_field is not None:
             # Semantic search: Pinecone embeds the query with the
-            # field's model. An `embed` clause must stand alone.
+            # field's model. An `embed` clause must stand alone, and
+            # the field named MUST be the schema's embed field —
+            # naming any other field is refused with a 400.
             from pinecone.models.documents.score_by import EmbedQuery
-            score_by = [EmbedQuery(field=text_field, query=query_text)]
-        else:
-            # Full-text (BM25) search over the schema's text fields.
+            score_by = [EmbedQuery(field=embed_field, query=query_text)]
+            query_type = "EmbedQuery"
+        elif fts_fields:
+            # Full-text (BM25) search over the schema's searchable
+            # text fields only.
             from pinecone.models.documents.score_by import TextQuery
-            fields = [name for name, s in schema_fields.items()
-                      if s.get("type") == "string" and s.get("full_text_search")] or [text_field]
-            score_by = [TextQuery(query=query_text, fields=fields)]
+            score_by = [TextQuery(query=query_text, fields=fts_fields)]
+            query_type = "TextQuery"
+        elif schema_fields:
+            # The schema is known but offers no searchable text
+            # field: a legacy semantic_text index (legacy Records
+            # API only) or a vector/metadata-only schema. Sending a
+            # documents.* search anyway is a guaranteed 400, so
+            # refuse cleanly — the caller falls back to SQLite —
+            # and record why in the diagnostic.
+            if any(spec.get("semantic_text") for spec in schema_fields.values()):
+                query_type = "legacy_semantic_text"
+            else:
+                query_type = "no_searchable_field"
+            _record_pinecone_diagnostic(
+                "documents/search", None,
+                {**self._documents_diag(query_type), "error_type": "PineconeError"})
+            raise PineconeError(
+                f"Pinecone documents search is not supported for this index schema ({query_type}); "
+                "falling back to the local document store.")
+        else:
+            # Schema unknown (describe failed or returned no
+            # fields): keep the previous fallback — a BM25 clause
+            # on the "text" field — rather than guessing an embed
+            # field that may not exist.
+            from pinecone.models.documents.score_by import TextQuery
+            score_by = [TextQuery(query=query_text, fields=[text_field])]
+            query_type = "TextQuery"
         kwargs = {"namespace": namespace, "score_by": score_by, "top_k": top_k,
                   "include_fields": ["*"]}
+        client_filter = None
         if filt:
-            kwargs["filter"] = filt
+            if _filter_targets_data_field(filt, schema_fields):
+                # A $eq filter on a data/search field is refused
+                # with a 400: search unfiltered and apply the same
+                # equality client-side on the returned matches.
+                client_filter = filt
+            else:
+                kwargs["filter"] = filt
         resp = self._documents_call(
             "documents/search",
-            lambda: index.documents.search(**kwargs), attempts=attempts)
-        return [_parse_document_match(m, text_field) for m in _match_list(resp)]
+            lambda: index.documents.search(**kwargs), attempts=attempts,
+            diag=self._documents_diag(query_type))
+        # Parse text from the field that actually carries the chunk
+        # text (the embed field when one was searched).
+        parse_field = embed_field or text_field
+        matches = [_parse_document_match(m, parse_field) for m in _match_list(resp)]
+        if client_filter:
+            matches = [m for m in matches
+                       if _match_satisfies_filter(m, client_filter)]
+        return matches
 
     def _documents_delete(self, namespace: str, document_id: str, attempts: int = 3) -> None:
         index = self._documents_index()
@@ -355,7 +519,7 @@ class PineconeVectorStore:
             "documents/delete",
             lambda: index.documents.delete(
                 namespace=namespace, filter={"document_id": {"$eq": document_id}}),
-            attempts=attempts)
+            attempts=attempts, diag=self._documents_diag("delete"))
     def upsert(self, namespace: str, items: list, attempts: int = 3) -> int:
         """items: dense -> {id, values, metadata}; integrated ->
         {id, text, metadata}. Returns the number of items sent.

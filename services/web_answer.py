@@ -69,6 +69,37 @@ def _mentions(text: str, term: str) -> bool:
     return re.search(r"\b" + re.escape(term) + r"\b", text.lower()) is not None
 
 
+# Verbs that name the ACTION of a how-to query, not its topic:
+# "make" in "how to make tea" must never qualify a result on its
+# own, or results about the Make automation platform (which
+# mention "make" but never "tea") hijack the answer.
+_ACTION_VERBS = frozenset({
+    "make", "do", "does", "create", "build", "cook", "prepare", "write",
+    "get", "take", "use", "using", "learn", "start", "grow", "fix",
+    "repair", "change", "open", "close", "remove", "install", "set",
+    "turn", "keep", "improve", "bake", "brew", "tie", "draw", "paint",
+    "play", "run", "say", "speak", "lose", "gain", "stop", "avoid",
+    "choose", "find", "give", "send", "move", "clean", "wash", "cut",
+    "fold", "wear", "drive", "buy", "sell", "grow", "plant", "boil",
+    "pour", "add", "stir", "heat", "place", "put", "fill", "wait",
+    "become", "being", "be",
+})
+
+
+def _content_nouns(query: str) -> list:
+    """The query's core content noun(s): substantive terms minus
+    the action verb(s). "how to make tea" -> ["tea"]; a query
+    with no noun left (e.g. "how to make it") yields []."""
+    return [t for t in _substantive_terms(query) if t not in _ACTION_VERBS]
+
+
+def _result_mentions_nouns(result: dict, nouns: list) -> bool:
+    """True when a result's title or snippet mentions at least one
+    content noun."""
+    hay = f"{result.get('title', '')} {result.get('snippet', '')}"
+    return any(_mentions(hay, noun) for noun in (nouns or []))
+
+
 def _is_polluted_text(text: str) -> bool:
     """Media/budget content in a single string (title or sentence),
     by the same patterns _is_polluted applies to whole results."""
@@ -92,6 +123,13 @@ def filter_results(query: str, results) -> list:
     - How-to pollution: for how-to queries, results about films,
       books, budgets or box-office figures are dropped, since
       their titles masquerade as instructions.
+    - Content-noun relevance (how-to queries only): a result must
+      mention the query's core content noun(s) — "tea" in "how
+      to make tea", not just the verb "make". Results with zero
+      content-noun overlap are dropped outright (no keep-all
+      fallback), so a platform named after the verb can never
+      hijack the answer. The caller may retry with an expanded
+      query before giving up.
     The original order and result dicts are preserved.
     """
     results = list(results or [])
@@ -116,6 +154,14 @@ def filter_results(query: str, results) -> list:
         clean = [r for r in kept
                  if not _is_polluted(r) or _howto_steps([clean_text(r.get("snippet", ""))], max_points=1)]
         kept = clean
+        # Content-noun gate: the verb alone ("make") never
+        # qualifies a result; the topic noun ("tea") must appear
+        # in the title or snippet. Zero overlap anywhere means
+        # the whole set is about something else — drop it all
+        # (the caller retries with an expanded query first).
+        nouns = _content_nouns(query)
+        if nouns:
+            kept = [r for r in kept if _result_mentions_nouns(r, nouns)]
     return kept
 
 
@@ -182,7 +228,10 @@ def _is_title_like(sentence: str) -> bool:
 def _howto_steps(snippets, max_points: int = 3) -> list:
     """Steps built ONLY from imperative instruction sentences in
     the result bodies. Titles are never steps: when no imperative
-    sentence exists, the result is empty rather than a headline."""
+    sentence exists, the result is empty rather than a headline.
+    A sentence that merely DEFINES the action verb ("Make is an
+    AI automation platform...") is a description, not an
+    instruction, and is dropped too."""
     steps, seen = [], set()
     for snippet in snippets or []:
         for sentence in split_into_sentences(snippet):
@@ -194,6 +243,8 @@ def _howto_steps(snippets, max_points: int = 3) -> list:
                 continue
             if _is_title_like(sentence):
                 continue
+            if _is_verb_definition(sentence):
+                continue
             if len(sentence.split()) < 3:
                 # A two-word fragment ("Brew Buch.") is a title tail,
                 # not an instruction a user can follow.
@@ -202,6 +253,20 @@ def _howto_steps(snippets, max_points: int = 3) -> list:
             if len(steps) >= max_points:
                 return steps
     return steps
+
+
+def _is_verb_definition(sentence: str) -> bool:
+    """"<verb> is/are ..." — the sentence defines the action word
+    ("Make is an AI automation platform") instead of instructing
+    the reader. Genuine instructions put an object after the verb
+    ("Make tea", "Boil water"), never a copula."""
+    words = re.findall(r"[a-z']+", (sentence or "").lower())
+    if not words:
+        return False
+    first = words[0]
+    if first in _SEQUENCE_WORDS and len(words) > 1:
+        first, words = words[1], words[1:]
+    return first in _IMPERATIVE_VERBS and len(words) > 1 and words[1] in ("is", "are", "was", "were")
 _META_WORDS = ("wikihow", "article", "will teach", "explains how", "guide explains",
               "with pictures", "read more", "learn more")
 

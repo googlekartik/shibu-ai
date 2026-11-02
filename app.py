@@ -574,14 +574,31 @@ def chat():
     # for a document question, say so — do not web-search a private
     # document question. Otherwise fall through to the normal pipeline.
     if profile["logged_in"]:
+        # Follow-up transforms operate on the previous ANSWER only
+        # ("make it shorter", "explain that more simply", ...):
+        # document retrieval must never run for a pure transform
+        # command, or a retrieved passage replaces the very answer
+        # being transformed. The router answers these from context
+        # at step 5k, so RAG is skipped for them here.
+        _followup_transform = None
+        try:
+            from services.context_memory import resolve_followup
+            _resolved_followup = resolve_followup(message_or_error, ctx)
+            if _resolved_followup is not None and _resolved_followup.get("kind") in (
+                    "simpler", "shorter", "another_example", "nth_example",
+                    "continue", "show_previous", "clarify"):
+                _followup_transform = _resolved_followup
+        except Exception:
+            _followup_transform = None
         _route = plan_request(message_or_error)
         _forced_doc = _route["use_rag"]
         try:
             _rule_rag = match_rule(message_or_error)
         except Exception:
             _rule_rag = {"intent": "UNKNOWN", "confidence": 0.0}
-        if (_forced_doc or _rule_rag.get("intent") == "UNKNOWN" or _rule_rag.get("rule_id") == "definition"
-                or float(_rule_rag.get("confidence") or 0) < 0.45):
+        if (_followup_transform is None
+                and (_forced_doc or _rule_rag.get("intent") == "UNKNOWN" or _rule_rag.get("rule_id") == "definition"
+                     or float(_rule_rag.get("confidence") or 0) < 0.45)):
             try:
                 _rag = _rag_service().rag_answer(_session_user_id(), message_or_error, context=ctx)
             except Exception:

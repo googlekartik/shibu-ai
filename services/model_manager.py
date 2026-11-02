@@ -74,6 +74,28 @@ def _record_provider_diagnostic(provider: str, diagnostic) -> None:
             # _choice_structure never contains response values.
             "choice_structure": diagnostic.get("choice_structure"),
         })
+        # Durable copy: process memory is wiped when the host
+        # restarts the service, which made /api/llm/status report
+        # "no error" after a template answer served before the
+        # restart. The file lives beside the SQLite database, so
+        # it survives restarts but not redeploys. Best-effort.
+        try:
+            from services.diagnostic_store import write_diagnostic
+            write_diagnostic("provider", dict(_LAST_PROVIDER_DIAGNOSTIC))
+        except Exception:
+            pass
+
+
+def _provider_diagnostic() -> dict | None:
+    """Last provider failure: process memory first, then the
+    durable sidecar (a fresh process after a restart)."""
+    if _LAST_PROVIDER_DIAGNOSTIC:
+        return dict(_LAST_PROVIDER_DIAGNOSTIC)
+    try:
+        from services.diagnostic_store import read_diagnostic
+        return read_diagnostic("provider")
+    except Exception:
+        return None
 
 # RAM thresholds used for automatic selection (see module docstring).
 SMALL_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -233,7 +255,7 @@ class ModelManager:
             "cached": is_cached(self.model_id) if self.mode == "local" and self.model_id else None,
             "recommendation": self._recommendation,
             "error": self._load_error,
-            "provider_error": dict(_LAST_PROVIDER_DIAGNOSTIC) or None,
+            "provider_error": _provider_diagnostic(),
         }
         if self.mode == "off":
             if self.cloud_only:

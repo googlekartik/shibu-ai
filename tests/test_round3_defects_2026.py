@@ -494,12 +494,11 @@ def test_r3_comparison_quiz_has_exactly_one_quiz_block():
     assert quiz["rule_id"] == "comparison_quiz"
     # The quiz itself lives in the response text, exactly once.
     assert quiz["response"].count("Quiz on the comparison:") == 1
-    # The presentation engine must not append a second quiz block
-    # derived from the same text.
+    # Round 5 (Q1): quiz payloads are exempt from presentation
+    # re-structuring entirely — the raw text IS the rendering, so
+    # no derived quiz/flashcards block can duplicate or mangle it.
     presentation = process_presentation("Give me a quiz on that comparison", quiz, ctx)
-    assert presentation is not None
-    quiz_blocks = [b for b in presentation["blocks"] if b.get("kind") == "quiz"]
-    assert len(quiz_blocks) == 0
+    assert presentation is None
 
 
 # ---------------------------------------------------------------- F12

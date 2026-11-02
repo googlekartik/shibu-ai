@@ -146,8 +146,28 @@ function renderBlocks(blocks, container) {
       const consList = document.createElement("ul"); (block.cons || []).forEach(i => consList.appendChild(el("li", "", i))); cons.appendChild(consList);
       wrap.appendChild(pros); wrap.appendChild(cons); container.appendChild(wrap);
     } else if (block.kind === "code") {
-      const pre = document.createElement("pre"); pre.className = "pres-code";
-      pre.appendChild(el("code", "", block.text)); container.appendChild(pre);
+      // Every code block gets the same labelled head + Copy button
+      // as a fenced block in plain-text rendering, whatever the
+      // language (python, javascript, ...) and whatever its
+      // position in the answer: a presentation code block without
+      // them rendered as a bare, unlabelled <pre>.
+      const codeText = block.text || "";
+      const codeBlock = document.createElement("div");
+      codeBlock.className = "code-block";
+      const head = document.createElement("div");
+      head.className = "code-head";
+      head.appendChild(el("span", "", (block.language || "").trim() || "code"));
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.className = "code-copy-btn";
+      copy.textContent = "Copy";
+      copy.onclick = () => copyTextWithFallback(codeText, copy);
+      head.appendChild(copy);
+      codeBlock.appendChild(head);
+      const pre = document.createElement("pre");
+      pre.appendChild(el("code", "", codeText));
+      codeBlock.appendChild(pre);
+      container.appendChild(codeBlock);
     } else if (block.kind === "equation") {
       container.appendChild(el("div", "pres-equation", block.text));
     } else if (block.kind === "chart") {

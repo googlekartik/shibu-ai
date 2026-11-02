@@ -99,6 +99,34 @@ def _pros_cons(analysis: dict, text: str) -> dict | None:
     return {"kind": "pros_cons", "pros": pros[:4], "cons": cons[:4]}
 
 
+def _strip_sources_section(text: str) -> str:
+    """Cut everything from the "Sources ..." section heading onward.
+
+    Web answers append a Sources list whose title lines match the
+    list-item pattern; without this cut those titles were
+    re-presented as steps. The body before Sources carries the
+    real instructions."""
+    match = re.search(r"(?im)^sources\s*[\(:].*$", text or "")
+    return text[:match.start()].rstrip() if match else text
+
+
+def _drop_source_titles(items: list, sources: list) -> list:
+    """Drop any item that IS a source title: steps must never be
+    built from result titles, in any formatter. Titles come from
+    the payload's own source list, so the comparison is exact."""
+    titles = set()
+    for source in sources or []:
+        name = source.get("source_name") if isinstance(source, dict) else None
+        if name:
+            titles.add(_norm_key(str(name)))
+    if not titles:
+        return items
+    return [it for it in items
+            if _norm_key(it) not in titles
+            and not any(title and len(title) >= 10 and _norm_key(it).startswith(title)
+                        for title in titles)]
+
+
 def _norm_key(text: str) -> str:
     """First 50 alphanumeric characters: enough to spot the same
     sentence repeated in the intro, a callout and the key points."""
@@ -138,19 +166,24 @@ def structure(response_text: str, analysis: dict, intent: dict, sources: list = 
         if pros_cons:
             blocks.append(pros_cons)
     elif content_type in ("process_steps", "algorithm", "roadmap"):
-        items = _list_items(text)
-        # A "Steps" block must contain only instructions. The raw
+        # Steps are built ONLY from the answer body before the
+        # Sources section, and never from a source title: the raw
         # answer text also carries a Sources section whose title
         # lines ("1. How to Make a Killing") match the list-item
-        # pattern — without this filter they were re-presented as
-        # steps. Headlines and media/budget lines are dropped;
-        # genuine steps (whatever verb they start with) survive.
+        # pattern — without this cut and the title check they were
+        # re-presented as steps. Headlines and media/budget lines
+        # are dropped; genuine steps (whatever verb they start
+        # with) survive.
+        steps_text = _strip_sources_section(text)
+        items = _list_items(steps_text)
         from services.web_answer import _is_polluted_text, _is_title_like
         items = [it for it in items
                  if not _is_title_like(it) and not _is_polluted_text(it)]
+        items = _drop_source_titles(items, sources)
         if not items:
-            items = [s for s in _sentences_from(text)[:8]
+            items = [s for s in _sentences_from(steps_text)[:8]
                      if not _is_title_like(s) and not _is_polluted_text(s)]
+            items = _drop_source_titles(items, sources)
         if items:
             blocks.append({"kind": "steps", "title": "Steps", "items": items[:10]})
         for code in _code_blocks(text):

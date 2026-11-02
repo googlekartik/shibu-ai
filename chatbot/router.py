@@ -15,7 +15,8 @@ from chatbot.rule_engine import match_rule
 from services.math_service import MathService, looks_like_math
 from services.pdf_service import PDFService
 from services.web_search_service import WebSearchService
-from services.web_answer import format_web_answer, clean_search_topic, filter_results
+from services.web_answer import (format_web_answer, clean_search_topic, filter_results,
+                              _is_howto_query, _content_nouns, _result_mentions_nouns)
 from services.code_service import (generate_code, debug_code, compare as compare_topics,
                                   detect_code_request, generate_code_for, explain_code)
 from services.code_runner import run_python_code
@@ -514,7 +515,20 @@ def _web_fallback_answer(text: str, context, processing_ms=0.0):
     topic = clean_search_topic(text)
     if not topic:
         return None
-    results = filter_results(topic, search_service.search(topic))
+    raw_results = search_service.search(topic)
+    if _is_howto_query(topic):
+        # Query expansion: when the first result set never mentions
+        # the task's content noun ("tea" in "how to make tea" — a
+        # set about the Make platform mentions only the verb), the
+        # first search answered the wrong thing. Retry once with
+        # an expanded query before giving up, and use the expanded
+        # set only when it actually covers the content noun.
+        nouns = _content_nouns(topic)
+        if nouns and not any(_result_mentions_nouns(r, nouns) for r in (raw_results or [])):
+            expanded = search_service.search(topic + " step by step")
+            if any(_result_mentions_nouns(r, nouns) for r in (expanded or [])):
+                raw_results = expanded
+    results = filter_results(topic, raw_results)
     if not results:
         return None
     payload = format_response(

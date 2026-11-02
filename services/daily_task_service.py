@@ -103,7 +103,21 @@ def _llm_draft(kind: str, message: str, context) -> tuple:
         system += " Context: " + " ".join(lines)
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": message}]
-    raw, err = manager.generate(messages, max_new_tokens=400, temperature=0.5)
+    try:
+        raw, err = manager.generate(messages, max_new_tokens=400, temperature=0.5)
+    except Exception:
+        # A provider surprise must never crash the chat or vanish
+        # without a trace: record the failure (structure-only, so
+        # /api/llm/status can show it) and fall through to the
+        # template, exactly as a returned error does.
+        try:
+            from services.model_manager import _record_provider_diagnostic
+            _record_provider_diagnostic(
+                getattr(manager, "mode", "unknown"),
+                {"status": None, "response_keys": []})
+        except Exception:
+            pass
+        return None, "error", None
     if err or not raw:
         return None, _friendly_error(err or "The language model returned nothing."), None
     return raw.strip(), None, (getattr(manager, "effective_model", None) or manager.model_id)

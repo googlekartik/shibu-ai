@@ -21,11 +21,16 @@ from services.source_retrieval_manager import collect_from_payload
 from services.visual_response_generator import generate_visuals
 
 # Intents that must never gain visual blocks: onboarding, maths,
-# file generation, memory commands, preferences, and no-evidence.
-_SKIP_INTENTS = {"ONBOARDING", "MATHEMATICS", "RAG_NO_EVIDENCE"}
+# file generation, memory commands, preferences, no-evidence,
+# quizzes (the raw quiz text is the designed rendering — blocks
+# re-split it into run-on key points and fragment flashcards),
+# and daily writing (a multi-line email draft must stay exactly
+# as written, not flattened into Overview/Key points).
+_SKIP_INTENTS = {"ONBOARDING", "MATHEMATICS", "RAG_NO_EVIDENCE", "QUIZ"}
 _SKIP_RULE_IDS = {"onboarding_avatar", "onboarding_name", "onboarding_goal",
                   "memory_remember", "memory_list", "memory_forget",
-                  "preferences_set", "preferences_show"}
+                  "preferences_set", "preferences_show",
+                  "daily_write", "comparison_quiz"}
 
 
 def should_present(payload: dict) -> bool:
