@@ -347,15 +347,16 @@ class ModelManager:
         traceback or an invented answer.
         """
         if self.mode == "meta":
-            from services.meta_service import MetaService
+            from services.meta_service import MetaService, META_MIN_OUTPUT_TOKENS
             svc = MetaService(api_key=self.meta_key, model=self.model_id, base=self.meta_base)
-            # Meta path only: floor the budget at 1024. Live
-            # diagnostics showed finish_reason "length" with null
-            # visible content at 256 — the budget was consumed
-            # before any visible content was produced. The
-            # OpenAI/HF fallthrough calls below keep the caller's
-            # original budget unchanged.
-            meta_tokens = max(int(max_new_tokens or 0), 1024)
+            # Meta path only: floor the budget at META_MIN_OUTPUT_TOKENS.
+            # Live diagnostics showed finish_reason "length" with null
+            # visible content at 256 and at 1024, with reasoning tokens
+            # reported in usage — the reasoning model consumes the
+            # output cap with thinking tokens before producing visible
+            # content. The OpenAI/HF fallthrough calls below keep the
+            # caller's original budget unchanged.
+            meta_tokens = max(int(max_new_tokens or 0), META_MIN_OUTPUT_TOKENS)
             text, err = svc.generate(messages, max_tokens=meta_tokens, temperature=temperature)
             if text:
                 self.effective_model = self.model_id

@@ -21,6 +21,36 @@ dashboard, never in git.
 import os
 
 
+# Output-cap floor for Meta calls. muse-spark-1.3 is a reasoning
+# model: its reasoning tokens count toward the output cap, so a
+# small cap is consumed by reasoning before any visible content is
+# produced (live: finish_reason "length" with null content at both
+# 256 and 1024, with the provider reporting reasoning_tokens in
+# usage.completion_tokens_details). 8192 leaves room for reasoning
+# plus an answer.
+META_MIN_OUTPUT_TOKENS = 8192
+
+# Documented reasoning_effort values. The provider rejects "none"
+# for Muse Spark, and picks its own depth when the field is
+# omitted; "low" keeps reasoning short so more of the cap is left
+# for visible content.
+_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
+_DEFAULT_REASONING_EFFORT = "low"
+
+
+def _resolve_reasoning_effort():
+    """Validated reasoning effort from META_REASONING_EFFORT.
+
+    Read at call time so the value can be set per deployment.
+    Anything unrecognised — including "none", which the provider
+    rejects for Muse Spark — falls back to "low". Never passes an
+    unvalidated value through."""
+    value = os.environ.get("META_REASONING_EFFORT", "").strip().lower()
+    if value in _REASONING_EFFORTS:
+        return value
+    return _DEFAULT_REASONING_EFFORT
+
+
 class MetaService:
     def __init__(self, api_key=None, model=None, base=None):
         self.api_key = (api_key if api_key is not None else os.environ.get("META_API_KEY", "")).strip()
@@ -310,7 +340,7 @@ class MetaService:
                 "choice_structure": MetaService._choice_structure(body),
                 "usage_keys": MetaService._usage_keys(body)}
 
-    def generate(self, messages, max_tokens=1024, temperature=0.7):
+    def generate(self, messages, max_tokens=META_MIN_OUTPUT_TOKENS, temperature=0.7):
         """Return (text, error). text is None on failure.
 
         Every failure records self.last_diagnostic = {status,
@@ -319,10 +349,14 @@ class MetaService:
         facts plus plain guidance written here — never server
         message text, which could contain payload details.
 
-        Default max_tokens is 1024: live diagnostics showed the
-        model stopping for "length" with null visible content at
-        256, i.e. the budget was consumed before any visible
-        content was produced.
+        The request carries both max_completion_tokens (the
+        canonical cap on the chat endpoint) and max_tokens (the
+        deprecated alias, forwarded as max_completion_tokens),
+        with identical values so the alias mapping cannot
+        conflict. reasoning_effort is "low" by default (see
+        _resolve_reasoning_effort): the model's reasoning tokens
+        count toward the output cap, so the effort is kept low
+        and the cap high enough for reasoning plus an answer.
         """
         if not self.enabled:
             self.last_diagnostic = {"status": None, "response_keys": [],
@@ -330,10 +364,12 @@ class MetaService:
                                     "usage_keys": None}
             return None, "Meta API is not configured (set both META_API_KEY and META_MODEL)."
         # Floor the budget: live diagnostics showed finish_reason
-        # "length" with null visible content at 256, i.e. the budget
-        # was consumed before any visible content was produced.
-        # No caller may starve a Meta call below 1024 again.
-        max_tokens = max(int(max_tokens or 0), 1024)
+        # "length" with null visible content at 256 and at 1024,
+        # with reasoning tokens reported in usage — the budget was
+        # consumed by reasoning before any visible content was
+        # produced. No caller may starve a Meta call below the
+        # floor again.
+        max_tokens = max(int(max_tokens or 0), META_MIN_OUTPUT_TOKENS)
         url = self.base.rstrip("/") + "/chat/completions"
         try:
             import requests
@@ -342,7 +378,10 @@ class MetaService:
                 headers={"Authorization": f"Bearer {self.api_key}",
                          "Content-Type": "application/json"},
                 json={"model": self.model, "messages": messages,
-                      "max_tokens": max_tokens, "temperature": temperature},
+                      "max_tokens": max_tokens,
+                      "max_completion_tokens": max_tokens,
+                      "reasoning_effort": _resolve_reasoning_effort(),
+                      "temperature": temperature},
                 timeout=60)
             try:
                 body = resp.json()

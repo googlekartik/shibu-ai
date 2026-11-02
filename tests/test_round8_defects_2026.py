@@ -1,7 +1,9 @@
 """Round-8 regression tests (2026-11-02): Meta token budget raised to
 1024 after the live diagnostic showed finish_reason "length" with
 null visible content at 256, plus the structure-only usage_keys
-diagnostic (key names only — never values)."""
+diagnostic (key names only — never values). Round 9 superseded the
+1024 floor with 8192 plus reasoning_effort; the two request-body
+tests below were updated to the new intended values."""
 
 import json
 
@@ -74,10 +76,12 @@ def test_r8_meta_text_extraction_unchanged(monkeypatch):
     assert text == "Hello there." and err is None
 
 
-def test_r8_meta_request_carries_1024_tokens(monkeypatch):
-    """The default call (no explicit budget) sends max_tokens 1024,
-    and an explicit small budget is floored to 1024 at the Meta
-    boundary — no Meta call may be starved below 1024 again."""
+def test_r8_meta_request_carries_8192_tokens(monkeypatch):
+    """The default call (no explicit budget) sends max_tokens 8192,
+    and an explicit small budget is floored to 8192 at the Meta
+    boundary — no Meta call may be starved below the floor again.
+    (Round 9 raised the floor from 1024 to 8192; the request now
+    also carries max_completion_tokens and reasoning_effort.)"""
     import requests
     captured = {}
 
@@ -90,15 +94,19 @@ def test_r8_meta_request_carries_1024_tokens(monkeypatch):
 
     svc = MetaService(api_key="fake-key", model="m")
     monkeypatch.setattr(requests, "post", _fake_post)
+    monkeypatch.delenv("META_REASONING_EFFORT", raising=False)
     svc.generate([{"role": "user", "content": "hi"}])
-    assert captured["max_tokens"] == 1024
+    assert captured["max_tokens"] == 8192
+    assert captured["max_completion_tokens"] == 8192
+    assert captured["reasoning_effort"] == "low"
     svc.generate([{"role": "user", "content": "hi"}], max_tokens=256)
-    assert captured["max_tokens"] == 1024
+    assert captured["max_tokens"] == 8192
+    assert captured["max_completion_tokens"] == 8192
 
 
 def test_r8_manager_meta_branch_floors_small_budget(monkeypatch, tmp_path):
     """A caller passing max_new_tokens=64 through ModelManager still
-    sends 1024 to the Meta API; the diagnostic still flows through
+    sends 8192 to the Meta API; the diagnostic still flows through
     to status() with the new usage_keys field."""
     import requests
     import services.model_manager as mm
@@ -121,7 +129,7 @@ def test_r8_manager_meta_branch_floors_small_budget(monkeypatch, tmp_path):
         text, err = manager.generate([{"role": "user", "content": "Plan my day"}],
                                      max_new_tokens=64)
         assert text is None and err
-        assert captured["max_tokens"] == 1024
+        assert captured["max_tokens"] == 8192
         status = mm.ModelManager().status()
         error = status["provider_error"]
         assert error["choice_structure"]["finish_reason"] == "length"
