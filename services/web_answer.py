@@ -347,3 +347,44 @@ def clean_search_topic(text: str) -> str:
     t = _re.sub(r"(?i)^(what is|whats|what is the|define|meaning of|tell me about|explain|search|find|look up|browse)\s+", "", t)
     t = _re.sub(r"(?i)\s+(in simple terms|simply|in hindi|in english)\s*$", "", t)
     return t.strip(" ?.")
+
+
+# Built-in last-resort how-to steps: used ONLY when the model and the
+# web both yield nothing usable for a how-to question. A handful of
+# very common tasks, each a short list of imperative steps, labelled
+# as Shibu AI's own knowledge wherever they are shown. Nothing
+# outside this table gets steps invented for it.
+_BUILTIN_HOWTO_STEPS = {
+    "tea": ("How to make tea", [
+        "Boil fresh water in a kettle.",
+        "Warm the cup or teapot with a little of the hot water, then pour it away.",
+        "Put a tea bag, or a teaspoon of loose tea leaves, in the cup or pot.",
+        "Pour the boiling water over the tea.",
+        "Leave it to steep for 3 to 5 minutes.",
+        "Remove the tea bag, or strain out the leaves.",
+        "Add milk or sugar if you like, stir, and serve while it is hot.",
+    ]),
+    "coffee": ("How to make coffee", [
+        "Boil fresh water in a kettle.",
+        "Put ground coffee in a mug, filter, or French press — about one heaped tablespoon per cup.",
+        "Pour the hot water over the coffee grounds.",
+        "Leave it to brew for about 4 minutes, or let it drip through the filter.",
+        "Strain the coffee, or press the plunger down slowly.",
+        "Add milk or sugar if you like, stir, and serve while it is hot.",
+    ]),
+}
+
+
+def builtin_howto_steps(query: str):
+    """(title, steps) for a very common how-to task, or None.
+
+    Matching uses the query's content nouns ("tea" in "how to make
+    tea"), so "a cup of tea" and "brew coffee" match too. Anything
+    outside the small built-in table returns None — no steps are
+    invented for tasks Shibu does not know."""
+    low = (query or "").lower()
+    nouns = _content_nouns(query or "")
+    for key, (title, steps) in _BUILTIN_HOWTO_STEPS.items():
+        if key in nouns or re.search(r"\b" + re.escape(key) + r"\b", low):
+            return title, list(steps)
+    return None

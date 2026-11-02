@@ -110,6 +110,23 @@ def _strip_sources_section(text: str) -> str:
     return text[:match.start()].rstrip() if match else text
 
 
+# Sentences that report a failed lookup, never instructions: they
+# must never be built into Steps, in any formatter or block. A
+# how-to answer with no real steps has no Steps block at all.
+_LOOKUP_FAILURE_PATTERNS = (
+    re.compile(r"could not look up", re.I),
+    re.compile(r"no web results came back", re.I),
+    re.compile(r"try again in a moment", re.I),
+    re.compile(r"no results (came back|were found|found)", re.I),
+)
+
+
+def _is_lookup_failure(sentence: str) -> bool:
+    """True when a sentence reports that a lookup failed, rather
+    than instructing the reader."""
+    return any(p.search(sentence or "") for p in _LOOKUP_FAILURE_PATTERNS)
+
+
 def _drop_source_titles(items: list, sources: list) -> list:
     """Drop any item that IS a source title: steps must never be
     built from result titles, in any formatter. Titles come from
@@ -178,11 +195,13 @@ def structure(response_text: str, analysis: dict, intent: dict, sources: list = 
         items = _list_items(steps_text)
         from services.web_answer import _is_polluted_text, _is_title_like
         items = [it for it in items
-                 if not _is_title_like(it) and not _is_polluted_text(it)]
+                 if not _is_title_like(it) and not _is_polluted_text(it)
+                 and not _is_lookup_failure(it)]
         items = _drop_source_titles(items, sources)
         if not items:
             items = [s for s in _sentences_from(steps_text)[:8]
-                     if not _is_title_like(s) and not _is_polluted_text(s)]
+                     if not _is_title_like(s) and not _is_polluted_text(s)
+                     and not _is_lookup_failure(s)]
             items = _drop_source_titles(items, sources)
         if items:
             blocks.append({"kind": "steps", "title": "Steps", "items": items[:10]})

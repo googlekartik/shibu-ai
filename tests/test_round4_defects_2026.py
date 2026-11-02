@@ -149,6 +149,9 @@ def test_r4_meta_diagnostic_records_choice_structure_without_values(monkeypatch)
         "message_keys": ["content"],
         "content_type": "list",
         "part_types": ["output_text"],
+        "finish_reason": None,
+        "refusal_present": False,
+        "logprobs_present": False,
     }
     dumped = json.dumps(diag)
     assert "SECRET VALUE TEXT" not in dumped
@@ -431,7 +434,10 @@ def test_r4_email_template_is_fluent_multiline(monkeypatch):
     assert any(line.startswith("Subject:") for line in lines)
     assert any(line.startswith("Dear Manager") for line in lines)
     assert any(line.startswith("Yours sincerely") for line in lines)
-    assert any(line.strip() == "[Your name]" for line in lines)
+    # Round 6: a finished email — no bracketed placeholders at all,
+    # and with no display name known the name line is omitted.
+    assert "[" not in text and "Fill in" not in text
+    assert text.rstrip().endswith("Yours sincerely")
     assert "- [Your name]" not in text and "• [Your name]" not in text
     for forbidden in FORBIDDEN:
         assert forbidden not in text

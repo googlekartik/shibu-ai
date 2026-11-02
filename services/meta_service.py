@@ -220,9 +220,15 @@ class MetaService:
     def _choice_structure(data) -> dict | None:
         """Structure ONLY of choices[0]: key names, the Python type
         of message.content, and the distinct part "type" values when
-        content is a list. No values, no payload text, no headers —
-        so a live failure can be diagnosed from /api/llm/status
-        without exposing anything the provider returned."""
+        content is a list. Plus the three facts that decide a
+        null-content failure: the finish_reason enum VALUE (a small
+        closed set: stop/length/refusal/content_filter/tool_calls),
+        whether message.refusal is a non-empty string, and whether
+        logprobs is present. No other values, no payload text, no
+        headers — so a live failure can be diagnosed from
+        /api/llm/status without exposing anything the provider
+        returned. Refusal TEXT is never recorded: it may contain
+        provider wording, and only its presence is diagnostic."""
         if isinstance(data, str):
             try:
                 import json
@@ -237,7 +243,9 @@ class MetaService:
         first = choices[0]
         if not isinstance(first, dict):
             return {"choice_keys": [], "message_keys": None,
-                    "content_type": type(first).__name__, "part_types": None}
+                    "content_type": type(first).__name__, "part_types": None,
+                    "finish_reason": None, "refusal_present": False,
+                    "logprobs_present": False}
         message = first.get("message")
         content = message.get("content") if isinstance(message, dict) else None
         if isinstance(content, list):
@@ -250,11 +258,19 @@ class MetaService:
         else:
             part_types = None
             content_type = type(content).__name__
+        finish_reason = first.get("finish_reason")
+        refusal = message.get("refusal") if isinstance(message, dict) else None
         return {
             "choice_keys": sorted(str(k) for k in first.keys()),
             "message_keys": sorted(str(k) for k in message.keys()) if isinstance(message, dict) else None,
             "content_type": content_type,
             "part_types": part_types,
+            # The finish_reason enum value is the decisive fact for a
+            # null-content 200: "refusal" means the provider refused,
+            # "stop" with no refusal means an empty generation.
+            "finish_reason": finish_reason if isinstance(finish_reason, str) else None,
+            "refusal_present": isinstance(refusal, str) and bool(refusal.strip()),
+            "logprobs_present": first.get("logprobs") is not None,
         }
 
     @staticmethod
@@ -299,6 +315,12 @@ class MetaService:
                 text = self._extract_text(body)
                 if text:
                     return text, None
+                # No extractable text: the diagnostic already records
+                # WHY (choice_structure.finish_reason,
+                # refusal_present, logprobs_present). A refusal is
+                # treated as this same outcome — the template
+                # fallback applies, and refusal text is never
+                # surfaced to the user.
                 return None, ("The Meta-compatible API returned a response in an unexpected format "
                               f"(HTTP 200, response keys: {keys_text}).")
             code = resp.status_code

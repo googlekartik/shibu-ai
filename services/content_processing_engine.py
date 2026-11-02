@@ -24,13 +24,17 @@ from services.visual_response_generator import generate_visuals
 # file generation, memory commands, preferences, no-evidence,
 # quizzes (the raw quiz text is the designed rendering — blocks
 # re-split it into run-on key points and fragment flashcards),
-# and daily writing (a multi-line email draft must stay exactly
-# as written, not flattened into Overview/Key points).
+# daily writing (a multi-line email draft must stay exactly
+# as written, not flattened into Overview/Key points), and the
+# how-to unavailable/built-in answers (a lookup-failure sentence
+# must never be re-presented as Steps, and built-in steps are
+# already numbered in the answer itself).
 _SKIP_INTENTS = {"ONBOARDING", "MATHEMATICS", "RAG_NO_EVIDENCE", "QUIZ"}
 _SKIP_RULE_IDS = {"onboarding_avatar", "onboarding_name", "onboarding_goal",
                   "memory_remember", "memory_list", "memory_forget",
                   "preferences_set", "preferences_show",
-                  "daily_write", "comparison_quiz"}
+                  "daily_write", "comparison_quiz",
+                  "daily_howto_unavailable", "daily_howto_builtin"}
 
 
 def should_present(payload: dict) -> bool:

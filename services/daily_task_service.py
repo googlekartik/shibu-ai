@@ -9,9 +9,12 @@ as daily tasks here.
 When no model is enabled or generation fails, the answer is an
 honest, labelled template (plan/email) or the existing web fallback
 (how-to) — never the generic "I'm not sure" dead end, and never a
-hidden error. Details the user did not give are placeholders
-([Name], [Date]) or marked as suggested times, never invented
-as personal facts.
+hidden error. The email template is a finished email, ready to
+send: no bracketed placeholders, no "fill in the details" lead-in.
+The signed-in display name is used as the sign-off when known;
+when it is not known the name line is omitted rather than
+placeholder text. Times the user did not give are marked as
+suggested, never invented as personal facts.
 """
 from __future__ import annotations
 
@@ -38,7 +41,9 @@ _SYSTEM = {
              "Do not invent personal details, names, or places the user did not give."),
     "write": ("You are Shibu AI, a helpful daily assistant. Draft ONLY the requested email or "
               "letter, ready to send: a subject line for emails, a greeting, the body, and a "
-              "closing. Use [Name] and [Date] placeholders for details the user did not give. "
+              "closing. Sign off with the user's preferred name when the context gives one; "
+              "otherwise close without a name line. Never use bracketed placeholders such as "
+              "[Name] or [Date] — the draft must be complete and ready to send. "
               "Do not add explanations before or after the draft, and do not invent facts."),
     "howto": ("You are Shibu AI, a helpful daily assistant. Give clear numbered steps for the "
               "task the user asked about. List ingredients or materials first when needed, "
@@ -200,8 +205,12 @@ def _template_plan(message: str) -> str:
     return "\n".join(lines)
 
 
-def _template_write(message: str) -> str:
-    """A ready-to-send skeleton using only details in the request."""
+def _template_write(message: str, display_name: str = "") -> str:
+    """A complete, ready-to-send email using only details in the
+    request. No bracketed placeholders, no "fill in" lead-in: the
+    reason is a generic sentence that needs no user input, and the
+    sign-off uses the display name when one is known — when it is
+    not, the name line is omitted entirely rather than faked."""
     low = message.lower()
     recipient = "Teacher"
     if "boss" in low or "manager" in low:
@@ -211,29 +220,38 @@ def _template_write(message: str) -> str:
     reason = "leave"
     if "sick" in low:
         reason = "sick leave"
-    when = "[Date]"
-    if "tomorrow" in low:
-        when = "tomorrow"
-    elif "today" in low:
-        when = "today"
-    # Natural phrasing: "leave tomorrow", never "leave on tomorrow",
-    # and no date is ever hardcoded — "tomorrow" stays "tomorrow".
-    when_phrase = when if when in ("tomorrow", "today") else f"on {when}"
-    subject = f"Subject: Request for {reason} {when_phrase}"
-    body = (
-        f"Dear {recipient},\n"
-        f"\n"
-        f"I am writing to request {reason} {when_phrase}. "
-        f"[Add a short reason here if you wish.]\n"
-        f"\n"
-        f"I will make sure my work is covered and catch up on anything I miss.\n"
-        f"\n"
-        f"Thank you for your understanding.\n"
-        f"\n"
-        f"Yours sincerely,\n"
-        f"[Your name]")
-    return ("Fill in the [bracketed] details:\n\n"
-            + subject + "\n\n" + body)
+    # No day is ever invented: with no day given, the request
+    # simply has no day in it, rather than a placeholder.
+    when = "tomorrow" if "tomorrow" in low else ("today" if "today" in low else "")
+    # Natural phrasing: "leave tomorrow", never "leave on tomorrow".
+    subject = f"Subject: Request for {reason} {when}" if when else f"Subject: Request for {reason}"
+    if "sick" in low:
+        reason_sentence = "I am unwell and need to rest at home."
+    else:
+        reason_sentence = "This is due to a personal commitment I need to attend to."
+    request_line = (f"I am writing to request {reason} {when}. {reason_sentence}"
+                    if when else f"I am writing to request {reason}. {reason_sentence}")
+    lines = [
+        subject,
+        "",
+        f"Dear {recipient},",
+        "",
+        request_line,
+        "",
+        "I wanted to let you know in advance so that my absence does not cause any inconvenience.",
+        "",
+        "I will make sure my work is covered and catch up on anything I miss.",
+        "",
+        "Thank you for your understanding.",
+        "",
+    ]
+    name = (display_name or "").strip()
+    if name:
+        lines.append("Yours sincerely,")
+        lines.append(name)
+    else:
+        lines.append("Yours sincerely")
+    return "\n".join(lines)
 
 
 def _template_week_plan(message: str) -> str:
@@ -297,6 +315,26 @@ def unavailable_howto_payload(message: str, context, processing_ms: float = 0.0)
     return payload
 
 
+def builtin_howto_payload(message: str, context, processing_ms: float = 0.0):
+    """Built-in last resort for a how-to when neither the model nor
+    the web could answer: a small table of very common tasks only.
+    Anything outside the table returns None, so no steps are ever
+    invented for a task Shibu does not know."""
+    from services.web_answer import builtin_howto_steps
+    found = builtin_howto_steps(message)
+    if not found:
+        return None
+    title, steps = found
+    text = title + "\n" + "\n".join(f"{i}. {step}" for i, step in enumerate(steps, 1))
+    text += "\n\nThese steps come from Shibu AI's own knowledge."
+    payload = format_response(
+        text=text, intent="DAILY_TASK", rule_id="daily_howto_builtin", confidence=0.80,
+        tool="Shibu AI knowledge", action="How-to steps from built-in knowledge",
+        processing_ms=processing_ms)
+    context.add_exchange(message, text, "DAILY_TASK", "daily_howto_builtin", 0.80)
+    return payload
+
+
 def build_daily_task_payload(message: str, context, processing_ms: float = 0.0):
     """LLM-first daily-task answer. Returns (payload, needs_web_fallback).
 
@@ -324,7 +362,8 @@ def build_daily_task_payload(message: str, context, processing_ms: float = 0.0):
     if kind == "plan" and "week" in message.lower():
         template = _template_week_plan(message)
     else:
-        template = _template_plan(message) if kind == "plan" else _template_write(message)
+        display_name = getattr(context, "display_name", "") or ""
+        template = _template_plan(message) if kind == "plan" else _template_write(message, display_name)
     if error and "no credits left" in error:
         # Genuinely quota-labelled failure only: the one friendly
         # line the quota behaviour requires, with no provider name,

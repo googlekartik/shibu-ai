@@ -265,7 +265,9 @@ def test_r3_meta_diagnostic_is_status_and_keys_only(monkeypatch):
     # appears in the diagnostic.
     assert svc.last_diagnostic["choice_structure"] == {
         "choice_keys": ["message"], "message_keys": ["content"],
-        "content_type": "dict", "part_types": None}
+        "content_type": "dict", "part_types": None,
+        "finish_reason": None, "refusal_present": False,
+        "logprobs_present": False}
     assert "shape" not in str(svc.last_diagnostic)
     assert MetaService._response_keys(
         {"id": "x", "output": []}) == ["id", "output"]

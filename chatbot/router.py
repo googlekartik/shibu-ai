@@ -1073,6 +1073,13 @@ def process_single_message(message: str, context, processing_ms=0.0, web_search_
             web_payload = _web_fallback_answer(text, context, processing_ms)
             if web_payload is not None:
                 return web_payload
+        # Built-in last resort for very common tasks (tea, coffee):
+        # only when the web yielded nothing usable. Anything else
+        # falls through to the honest unavailable answer below.
+        from services.daily_task_service import builtin_howto_payload
+        builtin_payload = builtin_howto_payload(text, context, processing_ms)
+        if builtin_payload is not None:
+            return builtin_payload
         return unavailable_howto_payload(text, context, processing_ms)
 
     # 5n) Quiz on the previous comparison: "give me a quiz on that

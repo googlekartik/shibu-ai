@@ -34,7 +34,9 @@ def test_templates_use_only_given_details():
     assert "suggested" in plan  # missing times are labelled, not invented as given
     email = _template_write("Write a polite email to my teacher asking for leave tomorrow")
     assert "Subject:" in email and "Dear Teacher" in email and "tomorrow" in email
-    assert "[Your name]" in email  # details not given stay placeholders
+    # Round 6: the template is a finished email — no bracketed
+    # placeholders and no "fill in" lead-in.
+    assert "[" not in email and "Fill in" not in email
 
 
 def _fake_llm(monkeypatch, draft):
@@ -129,7 +131,10 @@ def test_router_llm_error_for_howto_with_no_web_is_honest(monkeypatch):
     monkeypatch.setattr(daily, "ModelManager", lambda: FailingManager())
     monkeypatch.setattr(router, "ModelManager", lambda: FailingManager())
     monkeypatch.setattr(router.search_service, "search", lambda q: [])
-    out = process_message("How to make a cup of tea step by step", ConversationContext())
+    # An unknown task (outside the small built-in table) with no web
+    # results is still answered honestly — tea/coffee now get
+    # built-in steps instead of this path (round 6).
+    out = process_message("How to calibrate a flux capacitor step by step", ConversationContext())
     assert out["rule_id"] == "daily_howto_unavailable"
     assert "running well" not in out["response"]
     assert "could not look up" in out["response"]
