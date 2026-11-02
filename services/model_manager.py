@@ -70,6 +70,9 @@ def _record_provider_diagnostic(provider: str, diagnostic) -> None:
             "provider": provider,
             "status": diagnostic.get("status"),
             "response_keys": list(diagnostic.get("response_keys") or []),
+            # Structure only (key names, content type, part types):
+            # _choice_structure never contains response values.
+            "choice_structure": diagnostic.get("choice_structure"),
         })
 
 # RAM thresholds used for automatic selection (see module docstring).

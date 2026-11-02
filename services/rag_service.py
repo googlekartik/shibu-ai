@@ -29,7 +29,7 @@ from services.embeddings import EmbeddingError, get_embedder
 from services.rag_config import get_rag_config, namespace_for_user, validate_index_info
 from services.retrieval_metrics import retrieval_metrics
 from services.sqlite_store import SQLiteStore
-from services.vector_store import PineconeError, PineconeVectorStore
+from services.vector_store import PineconeError, PineconeVectorStore, pinecone_last_diagnostic
 
 
 SUPPORTED_EXTENSIONS = (".pdf", ".docx", ".xlsx", ".txt", ".md", ".html", ".htm", ".csv")
@@ -107,6 +107,7 @@ class RAGService:
             "namespace_strategy": "one namespace per Google sub (user-<sub>)",
             "live_pinecone": "blocked",
             "live_pinecone_reason": "",
+            "pinecone_error": pinecone_last_diagnostic(),
         }
         if user_id:
             try:
@@ -131,6 +132,11 @@ class RAGService:
             out["live_pinecone_reason"] = "; ".join(errors) if errors else "Index described and dimension matches the embedding model."
         except Exception as exc:
             out["live_pinecone_reason"] = str(exc)[:300]
+        # Safe diagnostic for the last failed Pinecone call
+        # (endpoint + HTTP status only): the live failure can be
+        # diagnosed from /api/rag/status without exposing payload.
+        # Set in the initial payload too, so the field is present
+        # in every backend mode.
         return out
 
     def _pinecone_store(self):
@@ -359,8 +365,21 @@ class RAGService:
                 retrieval_metrics.record("search", (time.perf_counter() - started) * 1000, True, len(out))
                 return out
             except Exception:
+                # Pinecone search failed at runtime (index, network,
+                # or schema problem): fall back to the caller's own
+                # SQLite chunks before answering, so a live Pinecone
+                # outage never reads as "no documents". Only when
+                # SQLite also has no match does the caller say the
+                # documents do not cover the question.
                 retrieval_metrics.record("search", (time.perf_counter() - started) * 1000, False, 0)
-                raise
+                hits = self.store.search_chunks_fallback(user_id, query, top_k=k,
+                                                          document_id=document_id,
+                                                          source_name=source_name)
+                for h in hits:
+                    h["backend"] = "sqlite_fallback"
+                hits = self._apply_retrieval_quality(query, hits, k)
+                retrieval_metrics.record("search", (time.perf_counter() - started) * 1000, True, len(hits))
+                return hits
         # SQLite fallback: token overlap, labelled as such.  It is a development
         # fallback, not a semantic-search claim.
         hits = self.store.search_chunks_fallback(user_id, query, top_k=k,

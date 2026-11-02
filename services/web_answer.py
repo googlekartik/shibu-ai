@@ -35,10 +35,14 @@ _GENERIC_WORDS = frozenset({
 _POLLUTION_PATTERNS = (
     re.compile(r"\bfilm\b", re.I),
     re.compile(r"\bmovie\b", re.I),
+    re.compile(r"\bthriller\b", re.I),
+    re.compile(r"\bIMDb\b"),
     re.compile(r"\bbox office\b", re.I),
     re.compile(r"\bstarring\b", re.I),
     re.compile(r"\bdirected by\b", re.I),
     re.compile(r"\bnovel\b", re.I),
+    re.compile(r"\bbook\b", re.I),
+    re.compile(r"\bhardcover\b|\bpaperback\b|\bISBN\b", re.I),
     re.compile(r"\bbestseller\b", re.I),
     re.compile(r"\bpublished\b.{0,20}\bby\b", re.I),
     re.compile(r"\bbudget\b", re.I),
@@ -65,9 +69,15 @@ def _mentions(text: str, term: str) -> bool:
     return re.search(r"\b" + re.escape(term) + r"\b", text.lower()) is not None
 
 
+def _is_polluted_text(text: str) -> bool:
+    """Media/budget content in a single string (title or sentence),
+    by the same patterns _is_polluted applies to whole results."""
+    return any(p.search(text or "") for p in _POLLUTION_PATTERNS)
+
+
 def _is_polluted(result: dict) -> bool:
     hay = f"{result.get('title', '')} {result.get('snippet', '')}"
-    return any(p.search(hay) for p in _POLLUTION_PATTERNS)
+    return _is_polluted_text(hay)
 
 
 def filter_results(query: str, results) -> list:
@@ -96,9 +106,16 @@ def filter_results(query: str, results) -> list:
         if relevant:
             kept = relevant
     if _is_howto_query(query):
-        clean = [r for r in kept if not _is_polluted(r)]
-        if clean:
-            kept = clean
+        # A polluted result survives ONLY if its own snippet
+        # contains a real imperative instruction (e.g. a
+        # filmmaking guide that happens to say "film"): media
+        # titles with no steps are dropped outright. When every
+        # result is polluted and step-less, nothing is kept — the
+        # caller then says honestly that no steps came back,
+        # instead of dressing headlines up as instructions.
+        clean = [r for r in kept
+                 if not _is_polluted(r) or _howto_steps([clean_text(r.get("snippet", ""))], max_points=1)]
+        kept = clean
     return kept
 
 

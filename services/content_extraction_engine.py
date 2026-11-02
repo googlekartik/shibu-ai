@@ -24,6 +24,13 @@ def _is_boilerplate(line: str) -> bool:
     return any(phrase in low for phrase in _BOILERPLATE)
 
 
+def is_quiz_fragment(sentence: str) -> bool:
+    """True for quiz-block artefacts ("Quiz on the comparison: 1.")
+    that must never leak into facts/key points: a quiz intro is a
+    prompt, not a retrieved fact, whatever follows it."""
+    return bool(re.match(r"^quiz\b", (sentence or "").strip(), re.I))
+
+
 def clean_passage(text: str) -> str:
     """Strip HTML/boilerplate lines, collapse whitespace, keep sentences."""
     if not text:
@@ -80,7 +87,7 @@ def extract_passages(text: str, query: str, max_sentences: int = 8) -> list:
     if not cleaned:
         return []
     sentences = extract_key_sentences([cleaned], query, max_sentences=max_sentences)
-    return [{"text": s} for s in sentences]
+    return [{"text": s} for s in sentences if not is_quiz_fragment(s)]
 
 
 def extract_from_items(items: list, query: str) -> list:
@@ -92,6 +99,8 @@ def extract_from_items(items: list, query: str) -> list:
         if not cleaned:
             continue
         for sentence in split_into_sentences(cleaned):
+            if is_quiz_fragment(sentence):
+                continue
             passages.append({
                 "text": sentence,
                 "source_name": item.get("source_name") or item.get("title") or "Source",

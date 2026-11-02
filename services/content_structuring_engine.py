@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 
-from services.content_extraction_engine import clean_passage, split_sections
+from services.content_extraction_engine import clean_passage, is_quiz_fragment, split_sections
 
 _YEAR_RE = re.compile(r"\b(1[89]\d{2}|20\d{2})\b")
 _CODE_FENCE_RE = re.compile(r"```(\w*)\n(.*?)```", re.S)
@@ -23,7 +23,7 @@ def _text(blocks):
 
 def _sentences_from(text: str) -> list:
     parts = re.split(r"(?<=[.!?])\s+", clean_passage(text))
-    return [p.strip() for p in parts if p.strip()]
+    return [p.strip() for p in parts if p.strip() and not is_quiz_fragment(p)]
 
 
 def _list_items(text: str) -> list:
@@ -139,8 +139,18 @@ def structure(response_text: str, analysis: dict, intent: dict, sources: list = 
             blocks.append(pros_cons)
     elif content_type in ("process_steps", "algorithm", "roadmap"):
         items = _list_items(text)
+        # A "Steps" block must contain only instructions. The raw
+        # answer text also carries a Sources section whose title
+        # lines ("1. How to Make a Killing") match the list-item
+        # pattern — without this filter they were re-presented as
+        # steps. Headlines and media/budget lines are dropped;
+        # genuine steps (whatever verb they start with) survive.
+        from services.web_answer import _is_polluted_text, _is_title_like
+        items = [it for it in items
+                 if not _is_title_like(it) and not _is_polluted_text(it)]
         if not items:
-            items = _sentences_from(text)[:8]
+            items = [s for s in _sentences_from(text)[:8]
+                     if not _is_title_like(s) and not _is_polluted_text(s)]
         if items:
             blocks.append({"kind": "steps", "title": "Steps", "items": items[:10]})
         for code in _code_blocks(text):

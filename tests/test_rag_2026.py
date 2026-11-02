@@ -69,12 +69,29 @@ def test_dimension_mismatch_is_migration_not_silent_fix():
 
 
 def test_pinecone_api_selection_by_index_type(monkeypatch):
-    """Fake transport proves dense uses the SDK vectors API while
-    integrated (document-schema) indexes use the Documents REST
-    API with the X-Pinecone-Api-Version header, without network."""
+    """Fake SDK proves dense uses the vectors API while integrated
+    (document-schema) indexes use index.documents.* with the
+    schema's text field, without network. The SDK sends the
+    X-Pinecone-Api-Version: 2026-07 header itself."""
     calls = []
 
+    class FakeDocuments:
+        def upsert(self, namespace, documents):
+            calls.append(("documents-upsert", namespace, documents))
+
+        def search(self, namespace, score_by, top_k, include_fields, filter=None):
+            calls.append(("documents-search", namespace, score_by, top_k, filter))
+            return {"result": {"hits": [
+                {"_id": "b", "_score": 0.9,
+                 "fields": {"text": "hello world",
+                            "document_id": "doc-1", "chunk_index": 0}}]}}
+
+        def delete(self, namespace, filter):
+            calls.append(("documents-delete", namespace, filter))
+
     class FakeIndex:
+        documents = FakeDocuments()
+
         def upsert(self, vectors, namespace):
             calls.append(("upsert", namespace, len(vectors)))
 
@@ -82,66 +99,36 @@ def test_pinecone_api_selection_by_index_type(monkeypatch):
             calls.append(("query", namespace))
             return {"matches": []}
 
-    class FakeResponse:
-        def __init__(self, payload):
-            self._payload = payload
-            self.status_code = 200
-
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return self._payload
-
-    def fake_post(url, headers=None, json=None, timeout=None):
-        calls.append(("documents", url, headers.get("X-Pinecone-Api-Version"),
-                      json))
-        if url.endswith("/documents/upsert"):
-            return FakeResponse({"upserted_count": 1})
-        if url.endswith("/documents/search"):
-            return FakeResponse({"result": {"hits": [
-                {"_id": "b", "_score": 0.9,
-                 "fields": {"text": "hello world",
-                            "document_id": "doc-1", "chunk_index": 0}}]}})
-        if url.endswith("/documents/delete"):
-            return FakeResponse({})
-        raise AssertionError(url)
-
-    import requests
-    monkeypatch.setattr(requests, "post", fake_post)
-
     dense = PineconeVectorStore(api_key="x", index_name="x", index_type="dense")
     dense._index = FakeIndex()
     dense.upsert("user-1", [{"id": "a", "values": [0.1, 0.2], "metadata": {}}])
     dense.query("user-1", vector=[0.1, 0.2], top_k=3)
     assert ("upsert", "user-1", 1) in calls and ("query", "user-1") in calls
-    assert not [c for c in calls if c[0] == "documents"]
+    assert not [c for c in calls if c[0].startswith("documents")]
 
     integ = PineconeVectorStore(api_key="x", index_name="x", index_type="integrated")
     integ._index = FakeIndex()
-    integ._index.describe_index_stats = lambda: {"namespaces": {}}
-    integ._host = "doc-host.pinecone.io"
+    integ._text_field = "text"
+    integ._schema_fields = {}
     integ.upsert("user-1", [{"id": "b", "text": "hello world",
                              "metadata": {"document_id": "doc-1", "chunk_index": 0}}])
     hits = integ.query("user-1", query_text="hello", top_k=3)
     integ.delete_by_document("user-1", "doc-1")
 
-    docs_calls = [c for c in calls if c[0] == "documents"]
-    assert len(docs_calls) == 3
-    for _kind, url, version, _body in docs_calls:
-        assert version == "2026-07"
-        assert url.startswith("https://doc-host.pinecone.io/namespaces/user-1/documents/")
-    upsert_body = docs_calls[0][3]
-    assert upsert_body["documents"][0]["_id"] == "b"
-    assert upsert_body["documents"][0]["text"] == "hello world"
-    assert upsert_body["documents"][0]["document_id"] == "doc-1"
-    assert upsert_body["documents"][0]["chunk_index"] == 0
-    search_body = docs_calls[1][3]
-    assert search_body["top_k"] == 3
-    assert search_body["score_by"][0]["query"] == "hello"
-    delete_body = docs_calls[2][3]
-    assert delete_body["filter"]["document_id"]["$eq"] == "doc-1"
+    docs_calls = [c for c in calls if c[0].startswith("documents")]
+    assert [c[0] for c in docs_calls] == ["documents-upsert", "documents-search", "documents-delete"]
+    upsert_docs = docs_calls[0][2]
+    assert upsert_docs[0]["_id"] == "b"
+    assert upsert_docs[0]["text"] == "hello world"
+    assert upsert_docs[0]["document_id"] == "doc-1"
+    assert upsert_docs[0]["chunk_index"] == 0
+    _kind, ns, score_by, top_k, filt = docs_calls[1]
+    assert ns == "user-1" and top_k == 3 and filt is None
+    assert len(score_by) == 1 and score_by[0].query == "hello"
+    assert score_by[0].fields == ["text"]
+    assert docs_calls[2][2]["document_id"]["$eq"] == "doc-1"
     assert hits and hits[0]["id"] == "b" and hits[0]["text"] == "hello world"
+
 
 
 def test_rag_status_reports_live_pinecone_blocked_not_success():

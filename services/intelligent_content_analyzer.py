@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 
+from services.content_extraction_engine import is_quiz_fragment
 from utils.text_processing import extract_keywords
 
 _NUMBER_RE = re.compile(r"\b\d+(?:[.,]\d+)?\s*(%|percent|million|billion|thousand|km|kg|mb|gb|years?|days?|hours?|minutes?|seconds?|°C|°F)?\b", re.I)
@@ -40,6 +41,8 @@ def analyze(passages: list, query: str, content_type: str = "explain") -> dict:
 
     facts, definitions, examples, statistics, conclusions = [], [], [], [], []
     for sentence in sentences:
+        if is_quiz_fragment(sentence):
+            continue
         if not relevant(sentence):
             continue
         low = sentence.lower()

@@ -246,34 +246,67 @@ def _fun_facts_answer(topic: str, count: int) -> str:
     return "\n".join(f"Fun fact {i + 1}: {s}" for i, s in enumerate(picked))
 
 
+_FACTS_WORDS = ("fun facts", "fun fact", "interesting facts", "interesting fact",
+                "cool facts", "cool fact", "amazing facts", "amazing fact")
+
+
 def _multipart_instruction(text: str, context, processing_ms=0.0):
-    """Parse 'explain <topic> to a 10 year old, then give N fun
-    facts, then ask me one question about it'.
+    """Parse explain + facts + question in one message, joined by
+    commas, "then", "and", or any combination:
+
+        Explain black holes to a 10 year old, then give 3 fun facts,
+        then ask me one question about it
+        Explain black holes, give me 3 interesting facts about
+        black holes, and ask me a question about black holes
 
     Returns a payload dict or None. All three parts are built from
     the topic's own rule answer and the facts bank — the word
-    'give' never reaches the dictionary/web fallback.
+    'give' never reaches the dictionary/web fallback. The output
+    is always explanation, then labelled facts, then a closing
+    question, in that order, whatever separator was used.
     """
-    low = (text or "").lower()
-    m = re.search(r"explain\s+(.+?)\s+to\s+a\s+10\s+year\s+old", low)
-    if not m:
+    low = (text or "").lower().strip()
+    if "explain" not in low or "question" not in low:
         return None
-    if "fun fact" not in low or "question" not in low:
+    if not any(word in low for word in _FACTS_WORDS):
         return None
-    topic = m.group(1).strip().strip(" ,")
+    # Split into parts on commas and on "then"/"and" before a verb.
+    raw_parts = re.split(r"\s*,\s*|\s+then\s+|\s+and\s+(?=(?:give|ask|tell|explain)\b)", low)
+    parts = []
+    for part in raw_parts:
+        part = part.strip()
+        part = re.sub(r"^(?:and|then)\s+", "", part)
+        part = part.strip(" .")
+        if part:
+            parts.append(part)
+    explain_part = next((p for p in parts if p.startswith("explain")), None)
+    facts_part = next((p for p in parts if "fact" in p), None)
+    question_part = next((p for p in parts if "question" in p), None)
+    if not explain_part or not facts_part or not question_part:
+        return None
+    topic = re.sub(r"^explain\s+", "", explain_part).strip()
+    topic = re.sub(r"\s+to\s+(?:a\s+)?(?:\d+\s+)?(?:year\s+old|kid|child|beginner)\s*$", "", topic)
+    topic = re.sub(r"\s+(?:in\s+simple\s+(?:words|terms)|simply|like\s+i'?m\s+\d+|to\s+me)\s*$", "", topic)
+    topic = topic.strip(" ,")
     if not topic:
         return None
-    n_match = re.search(r"give\s+(\d+)\s+fun facts?", low)
+    # The facts part may name its own topic ("facts about X");
+    # otherwise it inherits the explain topic.
+    facts_topic = topic
+    about = re.search(r"facts?\s+about\s+(.+)$", facts_part)
+    if about:
+        facts_topic = about.group(1).strip(" ,")
+    n_match = re.search(r"(\d+)\s+(?:fun\s+|interesting\s+|cool\s+|amazing\s+)?facts?", facts_part)
     n = int(n_match.group(1)) if n_match else 3
     rule = match_rule(topic)
     if rule["intent"] == "UNKNOWN":
         return None
     first = _first_sentence(rule["response"])
     explanation = simplify_sentence(first)
-    facts = _fun_facts_answer(topic, n)
+    facts = _fun_facts_answer(facts_topic, n)
     if not facts:
         return None
-    question = f"Here is one question for you: can you tell me one thing you learned about {topic}?"
+    question = f"Here is one question for you: can you tell me one thing you learned about {facts_topic}?"
     answer = (f"{explanation}\n\n{facts}\n\n{question}")
     payload = format_response(text=answer, intent="MULTI_PART_EXPLAIN",
         rule_id="multipart_explain", confidence=0.90,

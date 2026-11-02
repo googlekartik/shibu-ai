@@ -202,12 +202,22 @@ def _template_write(message: str) -> str:
         when = "tomorrow"
     elif "today" in low:
         when = "today"
-    subject = f"Subject: Request for {reason} on {when}"
-    body = (f"Dear {recipient},\n\n"
-            f"I am writing to request {reason} on {when}. "
-            f"I will make sure my work is covered and catch up on anything I miss.\n\n"
-            f"Thank you for your understanding.\n\n"
-            f"Yours sincerely,\n[Your name]")
+    # Natural phrasing: "leave tomorrow", never "leave on tomorrow",
+    # and no date is ever hardcoded — "tomorrow" stays "tomorrow".
+    when_phrase = when if when in ("tomorrow", "today") else f"on {when}"
+    subject = f"Subject: Request for {reason} {when_phrase}"
+    body = (
+        f"Dear {recipient},\n"
+        f"\n"
+        f"I am writing to request {reason} {when_phrase}. "
+        f"[Add a short reason here if you wish.]\n"
+        f"\n"
+        f"I will make sure my work is covered and catch up on anything I miss.\n"
+        f"\n"
+        f"Thank you for your understanding.\n"
+        f"\n"
+        f"Yours sincerely,\n"
+        f"[Your name]")
     return ("Fill in the [bracketed] details:\n\n"
             + subject + "\n\n" + body)
 

@@ -119,41 +119,42 @@ class _FakeDescribe:
         return {"dimension": 1024, "metric": "cosine", "index_type": "integrated"}
 
 
-def test_r3_documents_search_parses_hits_and_version_header(monkeypatch):
-    """Documents-API search sends the version header and parses
+def test_r3_documents_search_uses_sdk_documents_api(monkeypatch):
+    """Documents-API search goes through the SDK index.documents
+    namespace (pinecone>=10.1.0, API version 2026-07 handled by
+    the SDK) with a TextQuery score_by clause, and parses
     result.matches hits with fields + nested metadata."""
+    from pinecone.models.documents.score_by import TextQuery
     from services.vector_store import PineconeVectorStore
 
     seen = {}
 
-    class Resp:
-        status_code = 200
-
-        def raise_for_status(self):
-            return None
-
-        def json(self):
+    class FakeDocuments:
+        def search(self, **kwargs):
+            seen.update(kwargs)
             return {"result": {"hits": [
                 {"_id": "c1", "_score": 0.95,
                  "fields": {"text": "sunlight sentence",
                             "metadata": {"document_id": "d1", "chunk_index": 2}}}]}}
 
-    def fake_post(url, headers=None, json=None, timeout=None):
-        seen["url"] = url
-        seen["headers"] = headers
-        seen["body"] = json
-        return Resp()
+    class FakeIndex:
+        documents = FakeDocuments()
 
-    import requests
-    monkeypatch.setattr(requests, "post", fake_post)
     store = PineconeVectorStore(api_key="x", index_name="x", index_type="integrated")
-    store._host = "h.pinecone.io"
+    store._index = FakeIndex()
+    store._text_field = "text"
+    store._schema_fields = {}
     hits = store.query("user-9", query_text="sunlight", top_k=5)
-    assert seen["url"] == "https://h.pinecone.io/namespaces/user-9/documents/search"
-    assert seen["headers"]["X-Pinecone-Api-Version"] == "2026-07"
-    assert seen["body"]["score_by"][0]["fields"] == ["text"]
+    assert seen["namespace"] == "user-9"
+    assert seen["top_k"] == 5
+    assert seen["include_fields"] == ["*"]
+    assert len(seen["score_by"]) == 1
+    assert isinstance(seen["score_by"][0], TextQuery)
+    assert seen["score_by"][0].query == "sunlight"
+    assert seen["score_by"][0].fields == ["text"]
     assert hits[0]["id"] == "c1" and hits[0]["text"] == "sunlight sentence"
     assert hits[0]["metadata"]["document_id"] == "d1"
+    assert hits[0]["metadata"]["chunk_index"] == 2
 
 
 # ---------------------------------------------------------------- F2
@@ -257,7 +258,15 @@ def test_r3_meta_diagnostic_is_status_and_keys_only(monkeypatch):
     assert "HTTP 200" in err and "response keys: choices, usage" in err
     # Keys only: the nested payload values never appear.
     assert "shape" not in err and "tokens" not in err
-    assert svc.last_diagnostic == {"status": 200, "response_keys": ["choices", "usage"]}
+    assert svc.last_diagnostic["status"] == 200
+    assert svc.last_diagnostic["response_keys"] == ["choices", "usage"]
+    # Structure only: the dict-typed content is reported by its
+    # Python type name, and the nested value ("shape") never
+    # appears in the diagnostic.
+    assert svc.last_diagnostic["choice_structure"] == {
+        "choice_keys": ["message"], "message_keys": ["content"],
+        "content_type": "dict", "part_types": None}
+    assert "shape" not in str(svc.last_diagnostic)
     assert MetaService._response_keys(
         {"id": "x", "output": []}) == ["id", "output"]
 
@@ -285,7 +294,11 @@ def test_r3_llm_status_exposes_provider_error_without_values(monkeypatch):
     data = app_module.app.test_client().get("/api/llm/status").get_json()
     assert data["provider_error"]["status"] == 200
     assert data["provider_error"]["response_keys"] == ["output"]
-    assert set(data["provider_error"]) <= {"status", "response_keys", "provider"}
+    assert set(data["provider_error"]) <= {"status", "response_keys", "provider", "choice_structure"}
+    # No "choices" list at all: there is no choices[0] structure
+    # to report, so choice_structure is None rather than invented.
+    assert data["provider_error"]["choice_structure"] is None
+    assert "weird" not in json.dumps(data)
     assert "api_key" not in json.dumps(data).lower()
     assert "api_key" not in json.dumps(data).lower()
 

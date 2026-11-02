@@ -28,11 +28,11 @@ class MetaService:
         self.model = (model if model is not None else os.environ.get("META_MODEL", "")).strip()
         self.base = (base if base is not None else os.environ.get("META_API_BASE", "")).strip() or "https://api.meta.ai/v1"
         self.enabled = bool(self.api_key and self.model)
-        # Safe diagnostic from the last failed call: HTTP status +
-        # top-level response keys ONLY. Never values, never payload,
-        # never headers, never the key. Read by ModelManager for
-        # /api/llm/status so a live failure can be diagnosed
-        # without exposing anything sensitive.
+        # Safe diagnostic from the last failed call: HTTP status,
+        # top-level response keys, and the choices[0] structure ONLY.
+        # Never values, never payload, never headers, never the key.
+        # Read by ModelManager for /api/llm/status so a live failure
+        # can be diagnosed without exposing anything sensitive.
         self.last_diagnostic = None
 
     def status(self):
@@ -64,16 +64,30 @@ class MetaService:
 
         def _text_from_content(content):
             """A content value that is a string, a list of parts, or
-            a part that nests another content list."""
+            a part that nests another content list.
+
+            Parts carry a "type": only text-bearing types
+            ("text", "output_text", "input_text", or no type) yield
+            text. "reasoning"/"refusal" parts are skipped, so a
+            provider's internal reasoning is never shown as the
+            answer. A part may carry its text in "text" or in
+            "output_text"."""
             if isinstance(content, str) and content.strip():
                 return content.strip()
             if isinstance(content, list):
                 parts = []
                 for part in content:
                     if isinstance(part, dict):
+                        part_type = str(part.get("type") or "").lower()
+                        if part_type in ("reasoning", "refusal", "reasoning_text"):
+                            continue
                         piece = part.get("text")
                         if isinstance(piece, str) and piece.strip():
-                            parts.append(piece.strip())
+                            parts.append(piece)
+                            continue
+                        piece = part.get("output_text")
+                        if isinstance(piece, str) and piece.strip():
+                            parts.append(piece)
                             continue
                         nested = _text_from_content(part.get("content"))
                         if nested:
@@ -81,33 +95,57 @@ class MetaService:
                             continue
                         piece = part.get("output_text")
                         if isinstance(piece, str) and piece.strip():
-                            parts.append(piece.strip())
+                            parts.append(piece)
                     elif isinstance(part, str) and part.strip():
-                        parts.append(part.strip())
+                        parts.append(part)
                 if parts:
-                    return "\n".join(parts)
+                    # Parts of one message are continuations
+                    # (streaming fragments included): concatenate,
+                    # do not insert newlines mid-sentence.
+                    return "".join(parts).strip() or None
             if isinstance(content, dict):
                 return _text_from_content(content.get("content"))
             return None
 
+        def _text_from_message(message):
+            """Text from one message-like dict: its content first,
+            then sibling text fields when content is null/empty."""
+            if not isinstance(message, dict):
+                return None
+            text = _text_from_content(message.get("content"))
+            if text:
+                return text
+            for key in ("text", "answer", "output", "content_text", "output_text"):
+                text = _text_from_content(message.get(key))
+                if text:
+                    return text
+            return None
+
         # 1. OpenAI chat-completions shape: choices[0].message.content
         #    (content may be a string or a list of parts), plus
-        #    streaming-style delta fragments joined in order.
+        #    streaming-style delta fragments joined in order. When
+        #    content is null/empty, sibling message fields and
+        #    choice-level fields are tried before giving up.
         choices = data.get("choices")
         if isinstance(choices, list) and choices:
             delta_fragments = []
             for choice in choices:
+                if isinstance(choice, str) and choice.strip():
+                    return choice.strip()
                 if not isinstance(choice, dict):
                     continue
-                text = _text_from_content((choice.get("message") or {}).get("content"))
+                text = _text_from_message(choice.get("message"))
                 if text:
                     return text
                 delta = choice.get("delta")
                 if isinstance(delta, dict):
-                    text = _text_from_content(delta.get("content"))
+                    text = _text_from_message(delta)
                     if text:
                         delta_fragments.append(text)
                 text = _text_from_content(choice.get("text"))
+                if text:
+                    return text
+                text = _text_from_content(choice.get("answer"))
                 if text:
                     return text
                 text = _text_from_content(choice.get("content"))
@@ -117,6 +155,11 @@ class MetaService:
             # only after every choice has been examined.
             if delta_fragments:
                 return "".join(delta_fragments)
+        # 1b. Top-level message object (some providers wrap the
+        #     assistant message without a choices list).
+        text = _text_from_message(data.get("message"))
+        if text:
+            return text
         # 2. Responses-style shape: output[].content[].text (+ output_text)
         output = data.get("output")
         if isinstance(output, list):
@@ -173,6 +216,55 @@ class MetaService:
             return sorted(str(k) for k in data.keys())
         return []
 
+    @staticmethod
+    def _choice_structure(data) -> dict | None:
+        """Structure ONLY of choices[0]: key names, the Python type
+        of message.content, and the distinct part "type" values when
+        content is a list. No values, no payload text, no headers —
+        so a live failure can be diagnosed from /api/llm/status
+        without exposing anything the provider returned."""
+        if isinstance(data, str):
+            try:
+                import json
+                data = json.loads(data)
+            except Exception:
+                return None
+        if not isinstance(data, dict):
+            return None
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return None
+        first = choices[0]
+        if not isinstance(first, dict):
+            return {"choice_keys": [], "message_keys": None,
+                    "content_type": type(first).__name__, "part_types": None}
+        message = first.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, list):
+            part_types = sorted({str(p.get("type")) for p in content
+                                 if isinstance(p, dict) and p.get("type")})
+            content_type = "list"
+        elif content is None:
+            part_types = None
+            content_type = "NoneType"
+        else:
+            part_types = None
+            content_type = type(content).__name__
+        return {
+            "choice_keys": sorted(str(k) for k in first.keys()),
+            "message_keys": sorted(str(k) for k in message.keys()) if isinstance(message, dict) else None,
+            "content_type": content_type,
+            "part_types": part_types,
+        }
+
+    @staticmethod
+    def _diagnostic(resp_status, body) -> dict:
+        """Safe diagnostic for one call: HTTP status, top-level
+        response keys, and the choices[0] structure. Never values."""
+        return {"status": resp_status,
+                "response_keys": MetaService._response_keys(body),
+                "choice_structure": MetaService._choice_structure(body)}
+
     def generate(self, messages, max_tokens=256, temperature=0.7):
         """Return (text, error). text is None on failure.
 
@@ -183,7 +275,8 @@ class MetaService:
         contain payload details.
         """
         if not self.enabled:
-            self.last_diagnostic = {"status": None, "response_keys": []}
+            self.last_diagnostic = {"status": None, "response_keys": [],
+                                    "choice_structure": None}
             return None, "Meta API is not configured (set both META_API_KEY and META_MODEL)."
         url = self.base.rstrip("/") + "/chat/completions"
         try:
@@ -200,7 +293,7 @@ class MetaService:
             except Exception:
                 body = None
             keys = self._response_keys(body)
-            self.last_diagnostic = {"status": resp.status_code, "response_keys": keys}
+            self.last_diagnostic = self._diagnostic(resp.status_code, body)
             keys_text = ", ".join(keys) if keys else "none"
             if resp.status_code == 200:
                 text = self._extract_text(body)
@@ -220,5 +313,6 @@ class MetaService:
             return None, (f"Meta-compatible API returned HTTP {code} "
                           f"(response keys: {keys_text}). {guidance}")
         except Exception as exc:
-            self.last_diagnostic = {"status": None, "response_keys": []}
+            self.last_diagnostic = {"status": None, "response_keys": [],
+                                    "choice_structure": None}
             return None, f"Could not reach the Meta-compatible API: {exc}"[:300]
