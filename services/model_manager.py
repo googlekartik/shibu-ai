@@ -101,6 +101,40 @@ def _provider_diagnostic() -> dict | None:
         return None
 
 
+# Last provider-router decision in this process, for /api/llm/status:
+# task kind, chosen provider, stable reason code, and whether the
+# single fallback was used. No prompt text, no payload values.
+# Process-level for the same reason as _LAST_PROVIDER_DIAGNOSTIC:
+# ModelManager instances are created per request.
+_LAST_ROUTER_DECISION: dict = {}
+
+
+def _record_router_decision(decision: dict, fallback_used: bool) -> None:
+    _LAST_ROUTER_DECISION.clear()
+    _LAST_ROUTER_DECISION.update({
+        "task_kind": decision.get("task_kind"),
+        "provider": decision.get("provider"),
+        "reason": decision.get("reason"),
+        "fallback_used": bool(fallback_used),
+    })
+
+
+def _router_preference() -> str:
+    try:
+        from services.provider_router import router_preference
+        return router_preference()
+    except Exception:
+        return "auto"
+
+
+def _router_policy_version() -> int:
+    try:
+        from services.provider_router import POLICY_VERSION
+        return POLICY_VERSION
+    except Exception:
+        return 1
+
+
 def _diagnostic_response_keys(data) -> list:
     """Top-level keys of a response body, for diagnostics only.
     A JSON-string body is parsed once; anything else yields []."""
@@ -276,11 +310,8 @@ class ModelManager:
     """One place for: select -> (download once) -> load -> generate.
 
     Modes, decided at construction from the environment:
-    - "openai": OPENAI_API_KEY is set. ChatGPT API (gpt-4o-mini by
-              default) — the fastest, most reliable hosted option, and
-              the one used first when both OpenAI and HF keys are set.
-              On failure, the Hugging Face router is tried as a
-              second chance when HF_TOKEN is also set.
+    - "gemini": GEMINI_API_KEY is set. Google Gemini API
+              (gemini-2.5-flash by default) — the drafting option.
     - "api":   HF_TOKEN is set. Reuses the existing API service. No
               download, no local RAM cost. This is the recommended mode
               for a small PC.
@@ -289,11 +320,15 @@ class ModelManager:
     - "off":   neither. The rule engine is the whole brain, and every
               status call says so plainly instead of pretending an LLM
               is running.
+    Which hosted provider answers a given request is decided per
+    request by services/provider_router.py (task-aware: drafting to
+    Gemini, short/structured work to Hugging Face), with at most one
+    fallback call to the other provider. See generate().
     """
 
-    def __init__(self, token=None, model=None, use_local=None, openai_key=None):
-        self.openai_key = (openai_key if openai_key is not None else os.environ.get("OPENAI_API_KEY", "")).strip()
-        self.openai_model = (os.environ.get("OPENAI_MODEL", "").strip() or "gpt-4o-mini")
+    def __init__(self, token=None, model=None, use_local=None, gemini_key=None):
+        self.gemini_key = (gemini_key if gemini_key is not None else os.environ.get("GEMINI_API_KEY", "")).strip()
+        self.gemini_model = (os.environ.get("GEMINI_MODEL", "").strip() or "gemini-2.5-flash")
         self.token = (token if token is not None else os.environ.get("HF_TOKEN", "")).strip()
         self.cloud_only = os.environ.get("CLOUD_ONLY", "").strip().lower() in ("1", "true", "yes")
         requested_local = (use_local if use_local is not None
@@ -311,10 +346,15 @@ class ModelManager:
         self.effective_model = None
         self._last_api_diagnostic = None
         env_model = (model or os.environ.get("HF_MODEL", "")).strip()
-        if self.openai_key and not self.force_local:
-            self.mode = "openai"
-            self.model_id = self.openai_model
-            self.effective_model = self.openai_model
+        # The Hugging Face model, kept separate from model_id: in
+        # gemini mode model_id is the Gemini model, and sending that
+        # name to the HF router would always fail with HTTP 400.
+        # _generate_api always uses this HF model id.
+        self._hf_model_id = env_model or DEFAULT_API_MODEL
+        if self.gemini_key and not self.force_local:
+            self.mode = "gemini"
+            self.model_id = self.gemini_model
+            self.effective_model = self.gemini_model
         elif self.token and not self.force_local:
             self.mode = "api"
             self.model_id = env_model or DEFAULT_API_MODEL
@@ -339,11 +379,22 @@ class ModelManager:
     def status(self):
         """Safe to expose: never includes the token or any secret."""
         ram = _total_ram_gb()
+        # "mode" reflects the provider the router actually decided
+        # for the last LLM call ("gemini" or "api"); before any call
+        # it is the construction mode. Never "meta" or "openai":
+        # those providers were removed.
+        decided = _LAST_ROUTER_DECISION.get("provider") if _LAST_ROUTER_DECISION else None
+        # Only reflect a past decision when providers are actually
+        # configured now: in "off" mode (no keys in this process) a
+        # stale process-level decision from an earlier configuration
+        # must never make status() claim a provider is live.
+        mode = {"gemini": "gemini", "huggingface": "api"}.get(decided, self.mode) \
+            if self.mode != "off" else "off"
         info = {
-            "mode": self.mode,
+            "mode": mode,
             "model": self.model_id,
-            "loaded": self._model is not None or (self.mode == "api" and bool(self.token)) or (self.mode == "openai" and bool(self.openai_key)),
-            "device": self._device if self.mode == "local" else ("api" if self.mode in ("api", "openai") else None),
+            "loaded": self._model is not None or (self.mode == "api" and bool(self.token)) or (self.mode == "gemini" and bool(self.gemini_key)),
+            "device": self._device if self.mode == "local" else ("api" if self.mode in ("api", "gemini") else None),
             "ram_gb": round(ram, 1) if ram else None,
             "gpu": _has_gpu(),
             "cloud_only": self.cloud_only,
@@ -351,15 +402,20 @@ class ModelManager:
             "recommendation": self._recommendation,
             "error": self._load_error,
             "provider_error": _provider_diagnostic(),
+            "router": {
+                "preference": _router_preference(),
+                "last_decision": dict(_LAST_ROUTER_DECISION) if _LAST_ROUTER_DECISION else None,
+                "policy_version": _router_policy_version(),
+            },
         }
         if self.mode == "off":
             if self.cloud_only:
                 info["how_to_enable"] = (
-                    "This deployment is cloud-only. Set OPENAI_API_KEY for gpt-4o-mini, "
+                    "This deployment is cloud-only. Set GEMINI_API_KEY for Gemini, "
                     "or HF_TOKEN for Hugging Face hosted inference, in the service environment.")
             else:
                 info["how_to_enable"] = (
-                    "For the fastest answer, set OPENAI_API_KEY in .env (ChatGPT API, gpt-4o-mini). "
+                    "For the fastest answer, set GEMINI_API_KEY in .env (Google Gemini API). "
                     "Or set HF_TOKEN in a .env file to use the Hugging Face API, "
                     "or set HF_USE_LOCAL=1 and install requirements-llm.txt to run a small "
                     "model on this PC. Until then, Shibu AI answers from its rule engine.")
@@ -367,8 +423,8 @@ class ModelManager:
 
     def select(self):
         """Report the model that would be used, without downloading it."""
-        if self.mode == "openai":
-            return {"mode": "openai", "model": self.model_id, "note": "ChatGPT API (OpenAI) — fast, no download, no provider routing."}
+        if self.mode == "gemini":
+            return {"mode": "gemini", "model": self.model_id, "note": "Google Gemini API — fast, no download, no provider routing."}
         if self.mode == "api":
             return {"mode": "api", "model": self.model_id, "note": "Reusing the existing Hugging Face API configuration; no download needed."}
         if self.mode == "local":
@@ -385,12 +441,12 @@ class ModelManager:
         Download happens only here, only once (the Hub cache), and only
         when local mode was explicitly enabled.
         """
-        if self.mode == "openai":
-            return True, f"OpenAI API mode ready: {self.model_id} (ChatGPT API, fast response)."
+        if self.mode == "gemini":
+            return True, f"Gemini API mode ready: {self.model_id} (Google Gemini API, fast response)."
         if self.mode == "api":
             return True, f"API mode ready: {self.model_id} via the Hugging Face Inference Providers router."
         if self.mode == "off":
-            return False, "No language model is enabled. Set HF_TOKEN (API) or HF_USE_LOCAL=1 (local model) — see README section 13."
+            return False, "No language model is enabled. Set GEMINI_API_KEY or HF_TOKEN (API) or HF_USE_LOCAL=1 (local model) — see README section 13."
         if self._model is not None:
             return True, f"Local model already loaded: {self.model_id}."
         try:
@@ -425,47 +481,72 @@ class ModelManager:
             return False, self._load_error
 
     # -- generation --------------------------------------------------------
-    def generate(self, messages, max_new_tokens=256, temperature=0.7):
+    def generate(self, messages, max_new_tokens=256, temperature=0.7, task_kind=None):
         """Generate a reply for a chat history.
 
         `messages` is a list of {"role": "user"|"assistant"|"system",
         "content": str}. Returns (text, error). text is None on failure,
         so callers can fall back to the rule engine instead of showing a
         traceback or an invented answer.
+
+        Provider choice is decided FIRST by services/provider_router
+        from the task kind (when the caller knows it) or from the
+        prompt itself: drafting work goes to Gemini, short/structured
+        work to Hugging Face. Only the chosen provider is called;
+        on failure exactly ONE fallback call goes to the other
+        provider. Never a queue, never more than 2 provider calls
+        per request. Local mode is untouched by routing. When both
+        providers fail, the error is one clean neutral line — no
+        provider internals, no credits/billing wording; the detail
+        stays in the structure-only diagnostics for /api/llm/status.
         """
-        if self.mode == "openai":
-            from services.openai_service import OpenAIService
-            svc = OpenAIService(api_key=self.openai_key, model=self.model_id)
-            text, err = svc.generate(messages, max_tokens=max_new_tokens, temperature=temperature)
-            if text:
-                self.effective_model = self.model_id
-                return text, err
-            # Record the safe diagnostic (status + keys only) so
-            # /api/llm/status can explain the failure without
-            # exposing payload content.
-            _record_provider_diagnostic("openai", getattr(svc, "last_diagnostic", None) or
-                                        {"status": None, "response_keys": []})
-            # Second chance: an OpenAI quota/rate-limit error should
-            # not kill the answer outright when a Hugging Face token
-            # is also configured. Only then is the HF router tried;
-            # if it also fails, the original OpenAI error is returned
-            # so the failure is never mislabelled.
-            if err and self.token:
-                hf_text, _hf_err = self._generate_api(messages, max_new_tokens, temperature)
-                if hf_text:
-                    return hf_text, None
-                _record_provider_diagnostic("huggingface", self._last_api_diagnostic or
-                                            {"status": None, "response_keys": []})
-            return text, err
-        if self.mode == "api":
-            text, err = self._generate_api(messages, max_new_tokens, temperature)
-            if not text:
-                _record_provider_diagnostic("huggingface", self._last_api_diagnostic or
-                                            {"status": None, "response_keys": []})
-            return text, err
         if self.mode == "local":
             return self._generate_local(messages, max_new_tokens, temperature)
-        return None, "No language model is enabled."
+        if self.mode == "off":
+            return None, "No language model is enabled."
+        from services.provider_router import classify
+        decision = classify(task_kind, messages)
+        available = []
+        if self.gemini_key and not self.force_local:
+            available.append("gemini")
+        if self.token and not self.force_local:
+            available.append("huggingface")
+        if not available:
+            return None, "No language model is enabled."
+        chosen = decision["provider"]
+        if chosen not in available:
+            # The decided provider is not configured: use the other
+            # one and say so in the recorded decision, honestly.
+            decision = dict(decision, provider=available[0],
+                            reason="chosen_unavailable")
+            chosen = available[0]
+        order = [chosen] + [p for p in available if p != chosen]
+        for index, provider in enumerate(order):
+            if provider == "gemini":
+                text, _err = self._attempt_gemini(messages, max_new_tokens, temperature)
+            else:
+                text, _err = self._generate_api(messages, max_new_tokens, temperature)
+                if not text:
+                    _record_provider_diagnostic(
+                        "huggingface", self._last_api_diagnostic or
+                        {"status": None, "response_keys": []})
+            if text:
+                _record_router_decision(decision, fallback_used=index > 0)
+                return text, None
+        _record_router_decision(decision, fallback_used=len(order) > 1)
+        return None, "The language model could not draft this."
+
+    def _attempt_gemini(self, messages, max_new_tokens, temperature):
+        """One Gemini call. Records the safe diagnostic on failure."""
+        from services.gemini_service import GeminiService
+        svc = GeminiService(api_key=self.gemini_key, model=self.model_id)
+        text, err = svc.generate(messages, max_tokens=max_new_tokens, temperature=temperature)
+        if text:
+            self.effective_model = self.model_id
+            return text, err
+        _record_provider_diagnostic("gemini", getattr(svc, "last_diagnostic", None) or
+                                    {"status": None, "response_keys": []})
+        return text, err
 
     def _generate_api(self, messages, max_new_tokens, temperature):
         """Call Hugging Face Inference Providers via its router.
@@ -496,7 +577,7 @@ class ModelManager:
         except Exception as exc:
             return None, _plain_error(exc)
         candidates = []
-        base = self.model_id
+        base = self._hf_model_id
         if ":" in base:
             candidates.append(base)  # user already gave a provider suffix
         else:
@@ -551,7 +632,7 @@ class ModelManager:
             import requests
             prompt = "\n".join(f"{m['role']}: {m['content']}" for m in messages)
             resp = requests.post(
-                f"https://api-inference.huggingface.co/models/{self.model_id}",
+                f"https://api-inference.huggingface.co/models/{self._hf_model_id}",
                 headers={"Authorization": f"Bearer {self.token}"},
                 json={"inputs": prompt,
                       "parameters": {"max_new_tokens": max_new_tokens,

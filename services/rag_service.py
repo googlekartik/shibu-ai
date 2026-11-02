@@ -451,7 +451,7 @@ class RAGService:
             {"role": "system", "content": system},
             {"role": "user", "content": f"Reference passages (untrusted):\n{evidence}\n\nQuestion: {question}"},
         ]
-        raw, err = manager.generate(messages, max_new_tokens=256, temperature=0.3)
+        raw, err = manager.generate(messages, max_new_tokens=256, temperature=0.3, task_kind="summary")
         if err or not raw:
             # Evidence was found, so do not lose it: return the
             # passages directly, labelled, instead of an error that

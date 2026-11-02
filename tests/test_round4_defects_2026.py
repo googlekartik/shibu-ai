@@ -51,22 +51,24 @@ class _Resp:
         return self._payload
 
 
-def _openai_post(payload):
+def _gemini_post(payload):
     import requests
     return lambda *a, **k: _Resp(payload)
 
 
-def test_r4_openai_diagnostic_records_choice_structure_without_values(monkeypatch):
-    """A response whose part text lives under an unhandled key
-    still fails, but the diagnostic proves the structure: part
-    type output_text, content a list — and no payload values."""
+def test_r4_gemini_diagnostic_records_candidate_structure_without_values(monkeypatch):
+    """A response whose part carries no usable text (an unhandled
+    functionCall part) still fails, but the diagnostic proves the
+    structure: part key functionCall, content a list — and no
+    payload values."""
     import requests
-    payload = {"choices": [{"message": {"content": [
-        {"type": "output_text", "value": "SECRET VALUE TEXT"}]}}],
-               "usage": {"tokens": 7}}
-    monkeypatch.setattr(requests, "post", _openai_post(payload))
-    monkeypatch.setenv("OPENAI_API_KEY", "k")
-    monkeypatch.setenv("OPENAI_MODEL", "gpt-test")
+    payload = {"candidates": [{"content": {"parts": [
+        {"functionCall": {"name": "SECRET FN", "args": {"x": "SECRET VALUE TEXT"}}}]},
+        "finishReason": "STOP"}],
+               "usageMetadata": {"totalTokenCount": 7}}
+    monkeypatch.setattr(requests, "post", _gemini_post(payload))
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-test")
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
     manager = ModelManager()
@@ -75,22 +77,23 @@ def test_r4_openai_diagnostic_records_choice_structure_without_values(monkeypatc
     status = ModelManager().status()
     diag = status["provider_error"]
     assert diag["status"] == 200
-    assert diag["response_keys"] == ["choices", "usage"]
+    assert diag["response_keys"] == ["candidates", "usageMetadata"]
     assert diag["choice_structure"] == {
-        "choice_keys": ["message"],
-        "message_keys": ["content"],
+        "candidate_keys": ["content", "finishReason"],
+        "content_keys": ["parts"],
+        "part_types": ["functionCall"],
         "content_type": "list",
-        "part_types": ["output_text"],
-        "finish_reason": None,
-        "refusal_present": False,
-        "logprobs_present": False,
+        "finish_reason": "STOP",
+        "blocked_present": False,
+        "text_present": False,
     }
     dumped = json.dumps(diag)
     assert "SECRET VALUE TEXT" not in dumped
-    # usage_keys records key NAMES only: the key "tokens" appears,
-    # but its VALUE (7) never does.
-    assert diag["usage_keys"] == {"keys": ["tokens"], "nested": {}}
-    assert '"tokens": 7' not in dumped and "tokens\": 7" not in dumped
+    assert "SECRET FN" not in dumped
+    # usage_keys records key NAMES only: the key
+    # "totalTokenCount" appears, but its VALUE (7) never does.
+    assert diag["usage_keys"] == {"keys": ["totalTokenCount"], "nested": {}}
+    assert '"totalTokenCount": 7' not in dumped
 
 
 # ---------------------------------------------------------------- P1
@@ -351,11 +354,11 @@ def test_r4_email_template_is_fluent_multiline(monkeypatch):
     lines; 'leave tomorrow', never 'on tomorrow'; the signature
     is not a bullet."""
     class _Failing:
-        mode = "openai"
-        model_id = "gpt-4o-mini"
+        mode = "gemini"
+        model_id = "gemini-2.5-flash"
 
         def generate(self, *a, **k):
-            return None, "OpenAI returned HTTP 500: internal error."
+            return None, "Gemini returned HTTP 500: internal error."
 
     monkeypatch.setattr("services.daily_task_service.ModelManager", _Failing)
     from services.daily_task_service import build_daily_task_payload

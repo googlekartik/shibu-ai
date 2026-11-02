@@ -21,6 +21,8 @@ def test_recommend_model_by_ram():
 
 
 def test_model_manager_off_without_token_or_local(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.delenv("HF_USE_LOCAL", raising=False)
     monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
@@ -38,7 +40,7 @@ def test_model_manager_off_without_token_or_local(monkeypatch):
 def test_model_manager_api_mode_reuses_token(monkeypatch):
     monkeypatch.setenv("HF_TOKEN", "fake-token-for-test")
     monkeypatch.delenv("HF_USE_LOCAL", raising=False)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     m = ModelManager()
     assert m.mode == "api"
     assert m.model_id == "Qwen/Qwen2.5-3B-Instruct"
@@ -127,32 +129,40 @@ class _FakeResp:
         return self._payload
 
 
-def test_openai_mode_wins_when_key_set(monkeypatch):
+def test_gemini_mode_wins_when_key_set(monkeypatch):
     import requests as _requests
     def fake_post(url, headers=None, json=None, timeout=None):
-        assert url == "https://api.openai.com/v1/chat/completions"
-        assert json["model"] == "gpt-4o-mini"
-        return _FakeResp(200, {"choices": [{"message": {"content": "Fast ChatGPT answer."}}]})
+        assert url == ("https://generativelanguage.googleapis.com/v1beta"
+                       "/models/gemini-2.5-flash:generateContent")
+        assert headers["x-goog-api-key"] == "fake-gemini-key-for-test"
+        assert "key=" not in url
+        return _FakeResp(200, {"candidates": [{"content": {"parts": [{"text": "Fast Gemini answer."}],
+                                                          "role": "model"},
+                                              "finishReason": "STOP"}]})
     monkeypatch.setattr(_requests, "post", fake_post)
-    monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key-for-test")
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-gemini-key-for-test")
     monkeypatch.setenv("HF_TOKEN", "fake-hf-token-for-test")
     m = ModelManager()
-    assert m.mode == "openai"
-    assert m.model_id == "gpt-4o-mini"
+    assert m.mode == "gemini"
+    assert m.model_id == "gemini-2.5-flash"
     text, err = m.generate([{"role": "user", "content": "hi"}])
-    assert err is None and text == "Fast ChatGPT answer."
-    assert "fake-openai-key" not in str(m.status())
+    assert err is None and text == "Fast Gemini answer."
+    assert "fake-gemini-key" not in str(m.status())
 
 
-def test_openai_401_gives_key_hint(monkeypatch):
+def test_gemini_403_gives_key_hint(monkeypatch):
+    # The detailed hint lives in GeminiService itself; ModelManager.
+    # generate() returns one clean neutral error (detail stays in
+    # structure-only diagnostics), so the hint is checked here at
+    # the service level instead of through the manager.
     import requests as _requests
+    from services.gemini_service import GeminiService
     def fake_post(url, headers=None, json=None, timeout=None):
-        return _FakeResp(401, {"error": {"message": "Incorrect API key provided."}})
+        return _FakeResp(403, {"error": {"message": "API key not valid."}})
     monkeypatch.setattr(_requests, "post", fake_post)
-    monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key-for-test")
-    m = ModelManager()
-    text, err = m.generate([{"role": "user", "content": "hi"}])
-    assert text is None and "401" in err and "OPENAI_API_KEY" in err
+    text, err = GeminiService(api_key="fake-gemini-key-for-test").generate(
+        [{"role": "user", "content": "hi"}])
+    assert text is None and "403" in err and "GEMINI_API_KEY" in err
 
 
 def test_api_uses_router_and_parses_chat_completions(monkeypatch):
@@ -173,6 +183,8 @@ def test_api_uses_router_and_parses_chat_completions(monkeypatch):
 
 
 def test_api_401_gives_permission_hint_not_generic_failure(monkeypatch):
+    # As above: the hint lives in _generate_api; generate() itself
+    # returns the clean neutral error, checked in the router tests.
     import requests as _requests
     def fake_post(url, headers=None, json=None, timeout=None):
         return _FakeResp(401, {"error": "Invalid username or password."})
@@ -180,7 +192,7 @@ def test_api_401_gives_permission_hint_not_generic_failure(monkeypatch):
     monkeypatch.setenv("HF_TOKEN", "fake-token-for-test")
     monkeypatch.delenv("HF_USE_LOCAL", raising=False)
     m = ModelManager()
-    text, err = m.generate([{"role": "user", "content": "hi"}])
+    text, err = m._generate_api([{"role": "user", "content": "hi"}], 256, 0.7)
     assert text is None
     assert "401" in err and "Inference Providers" in err
 
@@ -206,6 +218,8 @@ def test_api_retries_with_auto_provider_after_400(monkeypatch):
 
 
 def test_api_400_after_all_providers_mentions_settings(monkeypatch):
+    # Hint checked at the _generate_api level; generate() returns
+    # the clean neutral error (see the router tests).
     import requests as _requests
     def fake_post(url, headers=None, json=None, timeout=None):
         return _FakeResp(400, {"error": "The requested model 'Qwen/Qwen2.5-3B-Instruct' is not supported by any provider you have enabled."})
@@ -214,7 +228,7 @@ def test_api_400_after_all_providers_mentions_settings(monkeypatch):
     monkeypatch.delenv("HF_USE_LOCAL", raising=False)
     monkeypatch.delenv("HF_PROVIDER", raising=False)
     m = ModelManager()
-    text, err = m.generate([{"role": "user", "content": "hi"}])
+    text, err = m._generate_api([{"role": "user", "content": "hi"}], 256, 0.7)
     assert text is None
     assert "inference-providers" in err and "featherless-ai" in err
 
@@ -235,6 +249,8 @@ def test_explicit_ai_when_api_fails_is_llm_error_not_unavailable(monkeypatch):
 
 
 def test_llm_endpoints_off(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.delenv("HF_USE_LOCAL", raising=False)
     monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)

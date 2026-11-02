@@ -159,11 +159,11 @@ def test_r3_documents_search_uses_sdk_documents_api(monkeypatch):
 # ---------------------------------------------------------------- F2
 def test_r3_daily_task_fallbacks_never_disclose_provider_failure(monkeypatch):
     class _Failing:
-        mode = "openai"
-        model_id = "gpt-4o-mini"
+        mode = "gemini"
+        model_id = "gemini-2.5-flash"
 
         def generate(self, *a, **k):
-            return None, "OpenAI returned HTTP 500: internal error."
+            return None, "Gemini returned HTTP 500: internal error."
 
     monkeypatch.setattr("services.daily_task_service.ModelManager", _Failing)
     for message in ("Plan my day with gym and study",
@@ -203,35 +203,39 @@ def test_r3_upload_failure_message_is_neutral(monkeypatch):
 
 # ---------------------------------------------------------------- F3
 
-def test_r3_openai_diagnostic_is_status_and_keys_only(monkeypatch):
+def test_r3_gemini_diagnostic_is_status_and_keys_only(monkeypatch):
     import requests
 
-    from services.openai_service import OpenAIService
+    from services.gemini_service import GeminiService
 
     class _Resp:
         status_code = 200
 
         def json(self):
-            return {"choices": [{"message": {"content": {"unexpected": "shape"}}}],
-                    "usage": {"tokens": 9}}
+            return {"candidates": [{"content": {"parts": [{"text": {"unexpected": "shape"}}]},
+                                    "finishReason": "STOP"}],
+                    "usageMetadata": {"totalTokenCount": 9}}
 
     monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp())
-    svc = OpenAIService(api_key="k", model="m")
+    svc = GeminiService(api_key="k", model="m")
     text, err = svc.generate([{"role": "user", "content": "hi"}])
     assert text is None
-    assert err == "OpenAI returned a response in an unexpected format."
+    assert err == "Gemini returned a response in an unexpected format."
     # Keys only: the nested payload values never appear.
-    assert "shape" not in err and "tokens" not in err
+    assert "shape" not in err and "totalTokenCount" not in err
     assert svc.last_diagnostic["status"] == 200
-    assert svc.last_diagnostic["response_keys"] == ["choices", "usage"]
-    # Structure only: the dict-typed content is reported by its
+    assert svc.last_diagnostic["response_keys"] == ["candidates", "usageMetadata"]
+    # Structure only: the dict-typed part text is reported by its
     # Python type name, and the nested value ("shape") never
     # appears in the diagnostic.
     assert svc.last_diagnostic["choice_structure"] == {
-        "choice_keys": ["message"], "message_keys": ["content"],
-        "content_type": "dict", "part_types": None,
-        "finish_reason": None, "refusal_present": False,
-        "logprobs_present": False}
+        "candidate_keys": ["content", "finishReason"],
+        "content_keys": ["parts"],
+        "part_types": ["text"],
+        "content_type": "list",
+        "finish_reason": "STOP",
+        "blocked_present": False,
+        "text_present": False}
     assert "shape" not in str(svc.last_diagnostic)
     from services.model_manager import _diagnostic_response_keys
     assert _diagnostic_response_keys(
@@ -248,12 +252,12 @@ def test_r3_llm_status_exposes_provider_error_without_values(monkeypatch):
             return {"output": [{"content": [{"type": "weird"}]}]}
 
     monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp())
-    monkeypatch.setenv("OPENAI_API_KEY", "k")
-    monkeypatch.setenv("OPENAI_MODEL", "gpt-test")
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-test")
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
     manager = ModelManager()
-    assert manager.mode == "openai"
+    assert manager.mode == "gemini"
     text, err = manager.generate("hello")
     assert text is None
     status = ModelManager().status()
@@ -275,7 +279,7 @@ def test_r3_llm_status_exposes_provider_error_without_values(monkeypatch):
     assert "api_key" not in json.dumps(data).lower()
 
 
-def test_r3_openai_unparseable_falls_through_to_hf(monkeypatch):
+def test_r3_gemini_unparseable_falls_through_to_hf(monkeypatch):
     import requests
 
     def _post(url, **kwargs):
@@ -283,15 +287,16 @@ def test_r3_openai_unparseable_falls_through_to_hf(monkeypatch):
             status_code = 200
 
             def json(self):
-                if "openai" in url:
-                    return {"choices": [{"message": {"content": {"weird": 1}}}]}
+                if "generativelanguage" in url:
+                    return {"candidates": [{"content": {"parts": [{"text": {"weird": 1}}]},
+                                            "finishReason": "STOP"}]}
                 return {"choices": [{"message": {"content": "hf wins"}}]}
 
         return _Resp()
 
     monkeypatch.setattr(requests, "post", _post)
-    monkeypatch.setenv("OPENAI_API_KEY", "k")
-    monkeypatch.setenv("OPENAI_MODEL", "gpt-test")
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-test")
     monkeypatch.setenv("HF_TOKEN", "hf-token")
     monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
     text, err = ModelManager().generate("hello")
@@ -354,8 +359,8 @@ def test_r3_summary_uses_stored_text_when_indexing_failed(monkeypatch):
 # ---------------------------------------------------------------- F6
 def test_r3_week_plan_template_is_day_by_day(monkeypatch):
     class _Failing:
-        mode = "openai"
-        model_id = "gpt-4o-mini"
+        mode = "gemini"
+        model_id = "gemini-2.5-flash"
 
         def generate(self, *a, **k):
             return None, "boom"

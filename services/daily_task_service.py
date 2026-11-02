@@ -89,10 +89,9 @@ def _context_lines(context) -> list:
 def _friendly_error(err: str) -> str:
     """Provider errors are internal detail: users get one short,
     neutral line. Raw provider text (model names, payload shapes,
-    API messages, URLs) is never shown to the user."""
-    text = (err or "").strip().lower()
-    if "429" in text or "no credits" in text or "insufficient_quota" in text or "quota" in text:
-        return "the language model's account has no credits left"
+    API messages, URLs, quota/credits wording) is never shown to
+    the user. The detail stays in the structure-only diagnostics
+    for /api/llm/status."""
     return "the language model could not draft this"
 
 
@@ -109,7 +108,7 @@ def _llm_draft(kind: str, message: str, context) -> tuple:
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": message}]
     try:
-        raw, err = manager.generate(messages, max_new_tokens=400, temperature=0.5)
+        raw, err = manager.generate(messages, max_new_tokens=400, temperature=0.5, task_kind=kind)
     except Exception:
         # A provider surprise must never crash the chat or vanish
         # without a trace: record the failure (structure-only, so
@@ -364,17 +363,10 @@ def build_daily_task_payload(message: str, context, processing_ms: float = 0.0):
     else:
         display_name = getattr(context, "display_name", "") or ""
         template = _template_plan(message) if kind == "plan" else _template_write(message, display_name)
-    if error and "no credits left" in error:
-        # Genuinely quota-labelled failure only: the one friendly
-        # line the quota behaviour requires, with no provider name,
-        # URL, or raw detail. Every other failure delivers the
-        # template cleanly, with no mention of the failure at all.
-        template += ("\n\nNote: the language model's account has no credits "
-                     "left, so this is a fill-in version you can complete.")
-    # The fallback is otherwise delivered cleanly: no mention of
-    # the language model, providers, or errors — the user only
-    # ever sees the plan/email itself. The internal error category
-    # stays in logs.
+    # The fallback is delivered cleanly: no mention of the language
+    # model, providers, credits, or errors — the user only ever sees
+    # the plan/email itself. The internal error category stays in
+    # the structure-only diagnostics.
     payload = format_response(
         text=template, intent="DAILY_TASK", rule_id=rule_id, confidence=0.70,
         tool="Template", action="Draft from a template",

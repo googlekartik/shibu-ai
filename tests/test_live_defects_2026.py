@@ -73,54 +73,57 @@ def test_d2_howto_web_answer_drops_film_and_book_pollution():
 # ---------------------------------------------------------------- D3
 
 
-def test_d3_openai_failure_falls_through_to_hf(monkeypatch):
+def test_d3_gemini_failure_falls_through_to_hf(monkeypatch):
     from services.model_manager import ModelManager
-    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
 
-    class _OpenAI:
+    class _Gemini:
         def __init__(self, *a, **k):
             pass
 
         def generate(self, *a, **k):
-            return None, "OpenAI returned HTTP 429"
+            return None, "Gemini returned HTTP 429"
     class _HF:
         pass
-    monkeypatch.setattr("services.openai_service.OpenAIService", _OpenAI)
+    monkeypatch.setattr("services.gemini_service.GeminiService", _Gemini)
     monkeypatch.setenv("HF_TOKEN", "hf-token")
     monkeypatch.setattr(ModelManager, "_generate_api",
                         lambda self, *a, **k: ("HF draft answer", None))
     manager = ModelManager()
-    assert manager.mode == "openai"
+    assert manager.mode == "gemini"
     text, err = manager.generate([{"role": "user", "content": "plan my day"}])
     assert text == "HF draft answer" and err is None
 
-    # All providers fail: the original OpenAI error is returned, never
-    # mislabelled as another provider's failure.
+    # All providers fail: one clean neutral error is returned —
+    # no provider internals, no credits/billing wording. The detail
+    # stays in the structure-only diagnostics.
     monkeypatch.setattr(ModelManager, "_generate_api",
                         lambda self, *a, **k: (None, "HF failed"))
     manager = ModelManager()
     text, err = manager.generate([{"role": "user", "content": "plan my day"}])
-    assert text is None and "OpenAI returned HTTP 429" in err
+    assert text is None and err == "The language model could not draft this."
+    for forbidden in ("429", "quota", "Gemini returned", "HF failed"):
+        assert forbidden not in err
 
 
 def test_d3_fallback_template_never_discloses_provider_error(monkeypatch):
-    assert "OpenAI" not in _friendly_error(
-        "OpenAI returned HTTP 500: internal error.")
-    assert _friendly_error("OpenAI returned HTTP 500: internal error.") == \
+    assert "Gemini" not in _friendly_error(
+        "Gemini returned HTTP 500: internal error.")
+    assert _friendly_error("Gemini returned HTTP 500: internal error.") == \
         "the language model could not draft this"
 
     class _StubManager:
-        mode = "openai"
-        model_id = "gpt-4o-mini"
+        mode = "gemini"
+        model_id = "gemini-2.5-flash"
 
         def generate(self, *a, **k):
-            return None, "OpenAI returned HTTP 500: internal error."
+            return None, "Gemini returned HTTP 500: internal error."
     monkeypatch.setattr("services.daily_task_service.ModelManager", _StubManager)
     payload, _needs_web = build_daily_task_payload("Plan my day with gym and study", _ctx(), 0.0)
     assert payload is not None
-    assert "OpenAI" not in payload["response"]
+    assert "Gemini" not in payload["response"]
     assert "429" not in payload["response"]
     # Round 3: the template is delivered cleanly — no mention of
     # the language model, no failure disclosure at all.
@@ -411,11 +414,11 @@ def test_d16_no_evidence_message_depends_on_whether_documents_exist(flask_client
 # ---------------------------------------------------------------- D-C6
 def test_dc6_template_week_plan_has_no_quiz_block(monkeypatch):
     class _StubManager:
-        mode = "openai"
-        model_id = "gpt-4o-mini"
+        mode = "gemini"
+        model_id = "gemini-2.5-flash"
 
         def generate(self, *a, **k):
-            return None, "OpenAI returned HTTP 500: internal error."
+            return None, "Gemini returned HTTP 500: internal error."
     monkeypatch.setattr("services.daily_task_service.ModelManager", _StubManager)
     payload, _needs_web = build_daily_task_payload(
         "Plan my week for the gym and study for an exam", _ctx(), 0.0)

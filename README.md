@@ -15,7 +15,7 @@ in the header, so the main view stays uncluttered.
 > **Cloud RAG upgrade (2026-10-31):** Signed-in document uploads now support
 > Pinecone-backed RAG with hosted embeddings, source citations, safe document
 > replacement/re-indexing, metadata filters, client-side hybrid scoring and
-> hosted OpenAI/Hugging Face routing. The Render deployment is cloud-only—no
+> hosted Gemini/Hugging Face routing. The Render deployment is cloud-only—no
 > local GPU, CUDA, or local model download is required. See
 > [`docs/RAG_AND_OPERATIONS.md`](docs/RAG_AND_OPERATIONS.md) and
 > [`docs/RENDER_DEPLOYMENT.md`](docs/RENDER_DEPLOYMENT.md); cloud LoRA/QLoRA is
@@ -189,13 +189,15 @@ Database persistence, user login, voice input/output, RAG over documents, larger
 ## Screenshots
 *(Add screenshots here after running the app — e.g. `docs/screenshot-chat.png`, `docs/screenshot-pdf.png`.)*
 
-## 18. GitHub, Cloud, and ChatGPT API (fast response)
+## 18. GitHub, Cloud, and Gemini API (drafting)
 
-**ChatGPT API:** Set `OPENAI_API_KEY` in `.env` (locally) or in your cloud host's Environment Variables (never in git, never in chat). Default model is `gpt-4o-mini` — fast and cheap; change it with `OPENAI_MODEL`. When this key is set, Shibu uses OpenAI first for UNKNOWN / `ai:` questions, before Hugging Face, and labels the answer with the model. If the key is missing or invalid, Shibu falls back to Hugging Face / rules and shows the real OpenAI error (401 = bad key, 429 = rate/credits, 404 = bad model name). Get a key at platform.openai.com — it is a paid API, so check your OpenAI billing/credits; a free Hugging Face token is the no-cost alternative.
+**Gemini API:** Set `GEMINI_API_KEY` in `.env` (locally) or in your cloud host's Environment Variables (never in git, never in chat). Default model is `gemini-2.5-flash`; change it with `GEMINI_MODEL` (use an id from your Google AI Studio model list). Get a key at Google AI Studio (aistudio.google.com) — it is a different Google credential from Google sign-in (`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`), which identifies users; the Gemini key authorises model calls. If the key is missing or invalid, Shibu falls back to Hugging Face / rules. A free Hugging Face token is the no-cost alternative. Note: `OPENAI_API_KEY`, if still set, is used only for RAG embeddings when `EMBEDDING_PROVIDER=openai` — chat generation no longer uses OpenAI.
+
+**Provider routing (Gemini vs Hugging Face):** `services/provider_router.py` decides per request, before any network call, which hosted provider answers first — no fixed queue, at most 2 provider calls per request (the chosen provider, plus exactly one fallback call to the other on failure). Drafting work (day/week plans, emails, letters, essays, long explanations, multi-part requests, prompts of 600+ chars) goes to Gemini; short/structured work (code, summaries, shorten/simplify rewrites, quizzes, how-to steps, short prompts) goes to Hugging Face. Callers that know the task kind (daily tasks, RAG summaries) pass it explicitly; other requests are classified from the prompt. `ROUTER_PREFERENCE=auto` (default) uses the classification; set it to `gemini` or `huggingface` to force the first choice (the single fallback still applies). The decision is exposed structure-only in `/api/llm/status` under `router` (preference, last decision, policy version — no prompt text). When both providers fail, the user sees one clean neutral line and the template fallback; provider detail stays in the diagnostics only.
 
 **GitHub:** The project is ready to push — `.gitignore` excludes `.env`, `venv/`, `generated/` and `uploads/`, so no secrets or outputs are committed. Create a repo on GitHub (e.g. `shibu-ai`), then push the project folder. Never commit `.env`.
 
-**Cloud (Render, free plan):** The project includes `Procfile` (`web: python app.py`), `render.yaml`, and `runtime.txt` (Python 3.12). On Render: New > Web Service > connect your GitHub repo, it will use `render.yaml` (build: `pip install -r requirements.txt`, start: `python app.py`). Then in Render's Environment tab, set `SECRET_KEY`, and either `OPENAI_API_KEY` or `HF_TOKEN` — do not put keys in the repo. The app listens on `0.0.0.0:$PORT`, which is what a cloud host requires (locally it still opens at http://127.0.0.1:5000). Note: Render's free plan sleeps after inactivity, so the first visit after a pause can take ~30-60 seconds to wake up. Uploaded documents and generated files are stored on the server's disk, so they do not survive a redeploy/restart on a free plan — download anything important first.
+**Cloud (Render, free plan):** The project includes `Procfile` (`web: python app.py`), `render.yaml`, and `runtime.txt` (Python 3.12). On Render: New > Web Service > connect your GitHub repo, it will use `render.yaml` (build: `pip install -r requirements.txt`, start: `python app.py`). Then in Render's Environment tab, set `SECRET_KEY`, and either `GEMINI_API_KEY` or `HF_TOKEN` — do not put keys in the repo. The app listens on `0.0.0.0:$PORT`, which is what a cloud host requires (locally it still opens at http://127.0.0.1:5000). Note: Render's free plan sleeps after inactivity, so the first visit after a pause can take ~30-60 seconds to wake up. Uploaded documents and generated files are stored on the server's disk, so they do not survive a redeploy/restart on a free plan — download anything important first.
 
 ## 19. New topics, conversation, and text-processed web answers (2026-10-27)
 
@@ -443,7 +445,7 @@ leaves the original plain payload untouched.
   `response` text is unchanged, so API clients, Copy, history and the Details panel work
   as before; `payload.presentation` carries `{content_type, level, blocks, citations,
   verification, visual_kinds}`.
-- **Not implemented**: token streaming. `ModelManager` (OpenAI/HF) is single-shot, so
+- **Not implemented**: token streaming. `ModelManager` (Gemini/HF) is single-shot, so
   streaming would require changing the model clients and the frontend send path; the
   existing "Thinking…" indicator is kept instead. PPTX upload is also not added (PPTX is
   output-only; upload supports PDF, DOCX, XLSX, TXT, MD, HTML, CSV).
@@ -501,14 +503,18 @@ steps; the template plan put gym at 09:00 inside the 9-to-5 work block;
 sidebar did not show the session's questions and Clear did not hide the
 Details panel (the browser profile had cached the previous app.js).
 
-- **ModelManager** (`services/model_manager.py`): on an OpenAI error, if an
-  HF token is also configured, the Hugging Face router is tried as a second
-  chance; if it also fails, the original OpenAI error is returned. No HF
-  token means no wasted HF attempt. This only helps if HF_TOKEN is set in
-  Render Environment; it does not fix the OpenAI credits problem itself.
-- **Daily tasks** (`services/daily_task_service.py`): provider errors are
-  shortened for users (quota errors say the model's account has no credits
-  left; billing URLs and raw API text are never shown). Template plans now
+- **ModelManager** (`services/model_manager.py`): the provider router
+  decides per request which provider answers first (drafting ->
+  Gemini, short/structured work -> Hugging Face), with exactly one
+  fallback call to the other provider on failure; if both fail, one
+  clean neutral error is returned and the detail stays in the
+  structure-only diagnostics. No HF token means no wasted HF attempt.
+  This only helps if HF_TOKEN is set in Render Environment; it does
+  not fix the Gemini key / HF provider problems themselves.
+- **Daily tasks** (`services/daily_task_service.py`): provider errors
+  are never shown to users — fallback templates are delivered
+  cleanly with no mention of providers, credits, or errors; billing
+  URLs and raw API text are never shown. Template plans now
   place unscheduled activities before/after a stated work range instead of
   inside it.
 - **Web how-tos** (`services/web_answer.py`): how-to queries re-rank a
@@ -569,7 +575,7 @@ three settings that apply immediately to the main chat. Full setup:
   validation, web-search toggle, Postgres fake-connection SQL checks).
   checks). Live Flask (no keys): ML explain now returns heading +
   Definition + Key points blocks; static JS serves `Cache-Control:
-  no-cache, max-age=0`. Still needs Kartik: OpenAI credits (or an HF
+  no-cache, max-age=0`. Still needs Kartik: a Gemini API key (or an HF
   token in Render) before any live model-drafted answer can work.
 
 ## 32. Muse-style layout, anime characters and code blocks (2026-11-02)

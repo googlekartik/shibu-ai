@@ -47,11 +47,13 @@ def _fake_llm(monkeypatch, draft):
         model_id = "fake-model"
         effective_model = "fake-model"
 
-        def generate(self, messages, max_new_tokens=256, temperature=0.7):
+        def generate(self, messages, max_new_tokens=256, temperature=0.7, task_kind=None):
             # The system prompt must carry the task kind, so a plan
-            # cannot silently become a generic answer.
+            # cannot silently become a generic answer; and the router
+            # must be told the kind the caller already knows.
             assert any("timetable" in m["content"] or "email" in m["content"]
                        or "numbered steps" in m["content"] for m in messages)
+            assert task_kind in ("howto", "plan", "write")
             return draft, None
 
     monkeypatch.setattr(daily, "ModelManager", lambda: FakeManager())
@@ -200,8 +202,10 @@ def test_daily_error_is_friendly_and_has_no_billing_url(monkeypatch):
 
     monkeypatch.setattr(daily, "ModelManager", lambda: QuotaManager())
     out = process_message("Write a polite email to my teacher asking for leave tomorrow", ConversationContext())
-    assert "no credits left" in out["response"]
+    assert "no credits left" not in out["response"]
+    assert "credits" not in out["response"].lower()
     assert "platform.openai.com" not in out["response"] and "http" not in out["response"]
+    assert "Subject:" in out["response"]
 
 
 def test_howto_web_summary_prefers_real_steps():

@@ -133,9 +133,11 @@ def test_rag_answer_passes_context_and_falls_back_to_passages(tmp_path, monkeypa
     class FailingManager:
         mode = "api"
 
-        def generate(self, messages, max_new_tokens=256, temperature=0.3):
-            # The grounded prompt must carry the user's context.
+        def generate(self, messages, max_new_tokens=256, temperature=0.3, task_kind=None):
+            # The grounded prompt must carry the user's context, and
+            # the RAG summary kind must be threaded through.
             assert any("Kartik" in m["content"] for m in messages)
+            assert task_kind == "summary"
             return None, "Model failed for test."
 
     monkeypatch.setattr(mm, "ModelManager", lambda: FailingManager())

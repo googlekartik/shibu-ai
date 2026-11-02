@@ -21,8 +21,8 @@ except OSError:
 os.environ.pop("PINECONE_API_KEY", None)
 os.environ.pop("PINECONE_INDEX_NAME", None)
 os.environ.pop("DEV_PANEL", None)
-os.environ.pop("OPENAI_API_KEY", None)
-os.environ.pop("OPENAI_MODEL", None)
+os.environ.pop("GEMINI_API_KEY", None)
+os.environ.pop("GEMINI_MODEL", None)
 os.environ.pop("HF_TOKEN", None)
 os.environ.pop("HF_USE_LOCAL", None)
 os.environ.pop("HF_FORCE_LOCAL", None)
@@ -85,51 +85,51 @@ def _clear_diagnostics(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------- M1
-def test_r5_openai_mode_day_plan_uses_model_text(monkeypatch):
-    """A mocked ModelManager in openai mode returning text -> the
+def test_r5_gemini_mode_day_plan_uses_model_text(monkeypatch):
+    """A mocked ModelManager in gemini mode returning text -> the
     day plan uses the model draft, not the template."""
 
-    class _OpenAIOK:
-        mode = "openai"
-        model_id = "gpt-4o-mini"
-        effective_model = "gpt-4o-mini"
+    class _GeminiOK:
+        mode = "gemini"
+        model_id = "gemini-2.5-flash"
+        effective_model = "gemini-2.5-flash"
 
         def generate(self, *a, **k):
             return "MODEL PLAN: gym at 6pm, study at 8pm.", None
 
-    monkeypatch.setattr("services.daily_task_service.ModelManager", _OpenAIOK)
+    monkeypatch.setattr("services.daily_task_service.ModelManager", _GeminiOK)
     payload, _needs_web = build_daily_task_payload(
         "Plan my day: I work 9 to 5, want gym and study time", _ctx(), 0.0)
     assert "MODEL PLAN" in payload["response"]
     assert "Language model" in payload["tool"]
 
 
-def test_r5_openai_failure_records_diagnostic_and_survives_restart(monkeypatch, tmp_path):
-    """An OpenAI failure (200 envelope, empty content) -> template
+def test_r5_gemini_failure_records_diagnostic_and_survives_restart(monkeypatch, tmp_path):
+    """A Gemini failure (200 envelope, empty parts) -> template
     + a non-null provider_error, and the diagnostic survives a
     simulated process restart (module state cleared) via the
     durable sidecar."""
     import requests
     import services.model_manager as mm
     _clear_diagnostics(monkeypatch, tmp_path)
-    monkeypatch.setenv("OPENAI_API_KEY", "fake-key")
-    monkeypatch.setenv("OPENAI_MODEL", "gpt-test")
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-test")
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
-    payload = {"choices": [{"message": {"role": "assistant", "content": ""}}],
-               "created": 1, "id": "x", "model": "gpt-test",
-               "object": "chat.completion", "usage": {}}
+    payload = {"candidates": [{"content": {"parts": [], "role": "model"},
+                               "finishReason": "STOP"}],
+               "usageMetadata": {}}
     monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp(payload))
     result, _needs_web = build_daily_task_payload(
         "Plan my day: I work 9 to 5, want gym and study time", _ctx(), 0.0)
     assert "Your day plan:" in result["response"]
     diag = mm.ModelManager().status().get("provider_error")
-    assert diag is not None and diag["provider"] == "openai" and diag["status"] == 200
+    assert diag is not None and diag["provider"] == "gemini" and diag["status"] == 200
     # Simulate a process restart: in-memory state is gone.
     mm._LAST_PROVIDER_DIAGNOSTIC.clear()
     diag_after_restart = mm.ModelManager().status().get("provider_error")
     assert diag_after_restart is not None
-    assert diag_after_restart["provider"] == "openai"
+    assert diag_after_restart["provider"] == "gemini"
     assert diag_after_restart["status"] == 200
 
 
@@ -139,8 +139,8 @@ def test_r5_generate_exception_records_diagnostic(monkeypatch, tmp_path):
     recorded for /api/llm/status."""
 
     class _Raising:
-        mode = "openai"
-        model_id = "gpt-4o-mini"
+        mode = "gemini"
+        model_id = "gemini-2.5-flash"
 
         def generate(self, *a, **k):
             raise RuntimeError("provider surprise")
@@ -152,7 +152,7 @@ def test_r5_generate_exception_records_diagnostic(monkeypatch, tmp_path):
         "Plan my day: I work 9 to 5, want gym and study time", _ctx(), 0.0)
     assert "Your day plan:" in payload["response"]
     diag = mm.ModelManager().status().get("provider_error")
-    assert diag is not None and diag["provider"] == "openai"
+    assert diag is not None and diag["provider"] == "gemini"
 
 
 # ---------------------------------------------------------------- P1

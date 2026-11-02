@@ -1,8 +1,8 @@
 """Round-7 regression tests (2026-11-02 round-6 live re-test findings).
 
 M7: the live /api/llm/status read during the round-6 re-test showed
-the OLD choice_structure shape (no finish_reason / refusal_present /
-logprobs_present) because the push landed mid-test and the first
+the OLD choice_structure shape (no finish_reason / blocked_present /
+text_present) because the push landed mid-test and the first
 check ran against round-5 code still serving (deploy race). These
 tests lock in that the CURRENT read path returns the full new-shape
 diagnostic from a fresh failure, from the durable sidecar after a
@@ -26,7 +26,7 @@ try:
 except OSError:
     pass
 for _key in ("PINECONE_API_KEY", "PINECONE_INDEX_NAME", "DEV_PANEL",
-             "OPENAI_API_KEY", "OPENAI_MODEL", "HF_TOKEN",
+             "GEMINI_API_KEY", "GEMINI_MODEL", "HF_TOKEN",
              "HF_USE_LOCAL", "HF_FORCE_LOCAL"):
     os.environ.pop(_key, None)
 
@@ -58,13 +58,13 @@ class _Resp:
         return self._payload
 
 
-def _openai_body(finish_reason, refusal):
-    return {"choices": [{"finish_reason": finish_reason, "index": 0,
-                         "logprobs": None,
-                         "message": {"content": None, "refusal": refusal,
-                                     "role": "assistant"}}],
-            "created": 1, "id": "x", "model": "gpt-test",
-            "object": "chat.completion", "usage": {}}
+def _gemini_body(finish_reason, blocked):
+    ratings = [{"category": "HARM_CATEGORY_HATE_SPEECH",
+                "probability": "HIGH", "blocked": blocked}]
+    return {"candidates": [{"content": {"parts": [], "role": "model"},
+                            "finishReason": finish_reason,
+                            "safetyRatings": ratings}],
+            "usageMetadata": {}}
 
 
 def _failing_llm(monkeypatch):
@@ -81,18 +81,18 @@ def _failing_llm(monkeypatch):
 
 
 # ---------------------------------------------------------------- M7
-def test_r7_fresh_openai_failure_status_has_new_diagnostic_keys(monkeypatch, tmp_path):
-    """A fresh null-content OpenAI failure surfaces finish_reason,
-    refusal_present and logprobs_present through ModelManager.status()
+def test_r7_fresh_gemini_failure_status_has_new_diagnostic_keys(monkeypatch, tmp_path):
+    """A fresh blocked Gemini failure surfaces finish_reason,
+    blocked_present and text_present through ModelManager.status()
     — the exact read path behind /api/llm/status and /api/health."""
     import services.model_manager as mm
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    monkeypatch.setenv("OPENAI_MODEL", "gpt-test")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-test")
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
     monkeypatch.setenv("SHIBU_DIAGNOSTIC_DIR", str(tmp_path))
     monkeypatch.setattr(requests, "post",
-                        lambda *a, **k: _Resp(_openai_body("refusal", "I cannot help with that.")))
+                        lambda *a, **k: _Resp(_gemini_body("SAFETY", True)))
     saved = dict(mm._LAST_PROVIDER_DIAGNOSTIC)
     mm._LAST_PROVIDER_DIAGNOSTIC.clear()
     try:
@@ -101,10 +101,10 @@ def test_r7_fresh_openai_failure_status_has_new_diagnostic_keys(monkeypatch, tmp
                                  max_new_tokens=64)
         assert text is None and err
         cs = mgr.status()["provider_error"]["choice_structure"]
-        assert cs["finish_reason"] == "refusal"
-        assert cs["refusal_present"] is True
-        assert cs["logprobs_present"] is False
-        assert cs["content_type"] == "NoneType"
+        assert cs["finish_reason"] == "SAFETY"
+        assert cs["blocked_present"] is True
+        assert cs["text_present"] is False
+        assert cs["content_type"] == "list"
     finally:
         mm._LAST_PROVIDER_DIAGNOSTIC.clear()
         mm._LAST_PROVIDER_DIAGNOSTIC.update(saved or {})
@@ -116,18 +116,18 @@ def test_r7_stale_sidecar_never_masks_fresh_diagnostic(monkeypatch, tmp_path):
     fresh diagnostic, and the sidecar is overwritten with it."""
     import json
     import services.model_manager as mm
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    monkeypatch.setenv("OPENAI_MODEL", "gpt-test")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-test")
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
     monkeypatch.setenv("SHIBU_DIAGNOSTIC_DIR", str(tmp_path))
     monkeypatch.setattr(requests, "post",
-                        lambda *a, **k: _Resp(_openai_body("refusal", "Nope.")))
-    old = {"provider": "openai", "status": 200, "response_keys": ["choices"],
-           "choice_structure": {"choice_keys": ["finish_reason", "index", "logprobs", "message"],
-                                "content_type": "NoneType",
-                                "message_keys": ["content", "refusal", "role"],
-                                "part_types": None}}
+                        lambda *a, **k: _Resp(_gemini_body("SAFETY", True)))
+    old = {"provider": "gemini", "status": 200, "response_keys": ["candidates"],
+           "choice_structure": {"candidate_keys": ["content", "finishReason"],
+                                "content_type": "list",
+                                "content_keys": ["parts"],
+                                "part_types": []}}
     (tmp_path / "provider_diagnostic.json").write_text(json.dumps(old))
     saved = dict(mm._LAST_PROVIDER_DIAGNOSTIC)
     mm._LAST_PROVIDER_DIAGNOSTIC.clear()
@@ -135,10 +135,10 @@ def test_r7_stale_sidecar_never_masks_fresh_diagnostic(monkeypatch, tmp_path):
         mgr = mm.ModelManager()
         mgr.generate([{"role": "user", "content": "Plan my day"}], max_new_tokens=64)
         cs = mgr.status()["provider_error"]["choice_structure"]
-        assert cs["finish_reason"] == "refusal"
-        assert cs["refusal_present"] is True
+        assert cs["finish_reason"] == "SAFETY"
+        assert cs["blocked_present"] is True
         stored = json.loads((tmp_path / "provider_diagnostic.json").read_text())
-        assert stored["choice_structure"]["finish_reason"] == "refusal"
+        assert stored["choice_structure"]["finish_reason"] == "SAFETY"
     finally:
         mm._LAST_PROVIDER_DIAGNOSTIC.clear()
         mm._LAST_PROVIDER_DIAGNOSTIC.update(saved)
@@ -148,13 +148,13 @@ def test_r7_restart_reads_new_shape_from_sidecar_only(monkeypatch, tmp_path):
     """Simulated restart: process memory cleared, only the durable
     sidecar remains — the status read still shows the new keys."""
     import services.model_manager as mm
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    monkeypatch.setenv("OPENAI_MODEL", "gpt-test")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-test")
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
     monkeypatch.setenv("SHIBU_DIAGNOSTIC_DIR", str(tmp_path))
     monkeypatch.setattr(requests, "post",
-                        lambda *a, **k: _Resp(_openai_body("stop", None)))
+                        lambda *a, **k: _Resp(_gemini_body("STOP", False)))
     saved = dict(mm._LAST_PROVIDER_DIAGNOSTIC)
     mm._LAST_PROVIDER_DIAGNOSTIC.clear()
     try:
@@ -162,9 +162,9 @@ def test_r7_restart_reads_new_shape_from_sidecar_only(monkeypatch, tmp_path):
                                    max_new_tokens=64)
         mm._LAST_PROVIDER_DIAGNOSTIC.clear()  # the restart
         cs = mm.ModelManager().status()["provider_error"]["choice_structure"]
-        assert cs["finish_reason"] == "stop"
-        assert cs["refusal_present"] is False
-        assert cs["logprobs_present"] is False
+        assert cs["finish_reason"] == "STOP"
+        assert cs["blocked_present"] is False
+        assert cs["text_present"] is False
     finally:
         mm._LAST_PROVIDER_DIAGNOSTIC.clear()
         mm._LAST_PROVIDER_DIAGNOSTIC.update(saved)

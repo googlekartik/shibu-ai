@@ -27,7 +27,8 @@ Set these in the Render dashboard, never in Git or browser JavaScript:
 | Variable | Required when | Purpose |
 |---|---|---|
 | `SECRET_KEY` | Always | Flask session signing; use a long random value. |
-| `OPENAI_API_KEY` | OpenAI chat or OpenAI embeddings | Hosted GPT-4o-mini and/or embeddings. |
+| `GEMINI_API_KEY` | Gemini drafting | Google Gemini chat generation (default gemini-2.5-flash). |
+| `OPENAI_API_KEY` | OpenAI embeddings only | RAG embeddings when `EMBEDDING_PROVIDER=openai`. Chat generation no longer uses OpenAI. |
 | `HF_TOKEN` | Hugging Face fallback | Hosted HF Inference Providers token. |
 | `PINECONE_API_KEY` | Pinecone RAG | Existing Pinecone account authentication. |
 | `PINECONE_INDEX_NAME` | Pinecone RAG | Existing index only; this app never creates an index. |

@@ -1,8 +1,8 @@
 """Muse-style frontend + anime characters tests (2026): the five
 characters, the new layout markers, code-block rendering markers,
-identity wording, the OpenAI provider chain, in-chat character
+identity wording, the Gemini provider chain, in-chat character
 choice, and legacy avatar-id aliases. No network, no keys: the
-OpenAI provider is exercised only with a mocked HTTP response, and
+Gemini provider is exercised only with a mocked HTTP response, and
 is inactive whenever its env key is absent."""
 import os
 import sys
@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import app as app_module
 from services.model_manager import ModelManager
-from services.openai_service import OpenAIService
+from services.gemini_service import GeminiService
 
 EXPECTED = [
     ("avatar-1", "Monkey D. Luffy", "avatars/avatar-1.svg"),
@@ -108,60 +108,63 @@ def test_profile_reports_character_name():
     assert me["avatar_url"].endswith("avatars/avatar-3.svg")
 
 
-def test_openai_provider_inactive_without_key(monkeypatch):
-    for var in ("OPENAI_API_KEY", "HF_TOKEN",
+def test_gemini_provider_inactive_without_key(monkeypatch):
+    for var in ("GEMINI_API_KEY", "HF_TOKEN",
                 "HF_FORCE_LOCAL", "HF_USE_LOCAL"):
         monkeypatch.delenv(var, raising=False)
-    svc = OpenAIService()
+    svc = GeminiService()
     assert svc.enabled is False
     text, err = svc.generate([{"role": "user", "content": "hi"}])
     assert text is None
-    assert "OPENAI_API_KEY" in err
-    assert ModelManager().mode != "openai"
+    assert "GEMINI_API_KEY" in err
+    assert ModelManager().mode != "gemini"
 
 
-def test_openai_provider_mocked_success_and_manager_mode(monkeypatch):
+def test_gemini_provider_mocked_success_and_manager_mode(monkeypatch):
     for var in ("HF_TOKEN", "HF_FORCE_LOCAL", "HF_USE_LOCAL"):
         monkeypatch.delenv(var, raising=False)
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
 
     class _Resp:
         status_code = 200
         text = "{}"
 
         def json(self):
-            return {"choices": [{"message": {"content": "Hello from OpenAI."}}]}
+            return {"candidates": [{"content": {"parts": [{"text": "Hello from Gemini."}],
+                                                "role": "model"},
+                                    "finishReason": "STOP"}]}
 
     with mock.patch("requests.post", return_value=_Resp()) as post:
-        svc = OpenAIService()
+        svc = GeminiService()
         assert svc.enabled is True
         text, err = svc.generate([{"role": "user", "content": "hi"}])
-        assert text == "Hello from OpenAI."
+        assert text == "Hello from Gemini."
         assert err is None
-        assert post.call_args[0][0] == "https://api.openai.com/v1/chat/completions"
-        assert post.call_args[1]["json"]["model"] == "gpt-4o-mini"
+        assert post.call_args[0][0] == ("https://generativelanguage.googleapis.com/v1beta"
+                                        "/models/gemini-2.5-flash:generateContent")
+        assert post.call_args[1]["headers"]["x-goog-api-key"] == "test-key"
         mm = ModelManager()
-        assert mm.mode == "openai"
-        assert mm.model_id == "gpt-4o-mini"
+        assert mm.mode == "gemini"
+        assert mm.model_id == "gemini-2.5-flash"
         assert mm.status()["loaded"] is True
         text, err = mm.generate([{"role": "user", "content": "hi"}])
-        assert text == "Hello from OpenAI."
+        assert text == "Hello from Gemini."
 
 
-def test_openai_provider_mocked_error_text(monkeypatch):
+def test_gemini_provider_mocked_error_text(monkeypatch):
     class _Resp:
-        status_code = 401
-        text = "unauthorized"
+        status_code = 403
+        text = "forbidden"
 
         def json(self):
             return {"error": {"message": "bad key"}}
 
     with mock.patch("requests.post", return_value=_Resp()):
-        svc = OpenAIService(api_key="zzkey", model="m")
+        svc = GeminiService(api_key="zzkey", model="m")
         text, err = svc.generate([{"role": "user", "content": "hi"}])
         assert text is None
-        assert "401" in err
+        assert "403" in err
         assert "zzkey" not in err  # the key value is never echoed
 
 

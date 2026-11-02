@@ -2,8 +2,8 @@
 
 Each test reproduces one defect from the 2026-11-02 14:32 IST
 re-test of round 5 (commit 8cbab94b). No network, no keys: the
-Meta payloads below are mocked strings used only as test input.
-Live Meta behaviour is NOT tested here; the parent re-tests it
+Gemini payloads below are mocked strings used only as test input.
+Live Gemini behaviour is NOT tested here; the parent re-tests it
 live after the push, reading the new diagnostic fields.
 """
 import os
@@ -17,7 +17,7 @@ try:
 except OSError:
     pass
 for _key in ("PINECONE_API_KEY", "PINECONE_INDEX_NAME", "DEV_PANEL",
-             "OPENAI_API_KEY", "OPENAI_MODEL", "HF_TOKEN",
+             "GEMINI_API_KEY", "GEMINI_MODEL", "HF_TOKEN",
              "HF_USE_LOCAL", "HF_FORCE_LOCAL"):
     os.environ.pop(_key, None)
 
@@ -31,7 +31,7 @@ from chatbot.router import process_message
 from services.content_processing_engine import process_presentation
 from services.content_structuring_engine import structure
 from services.daily_task_service import _template_write, build_daily_task_payload
-from services.openai_service import OpenAIService
+from services.gemini_service import GeminiService
 
 
 def _ctx(display_name=""):
@@ -50,56 +50,56 @@ class _Resp:
 
 
 # ---------------------------------------------------------------- M6
-def _openai_body(finish_reason, refusal):
-    return {"choices": [{"finish_reason": finish_reason, "index": 0,
-                         "logprobs": None,
-                         "message": {"content": None, "refusal": refusal,
-                                     "role": "assistant"}}],
-            "created": 1, "id": "x", "model": "gpt-test",
-            "object": "chat.completion", "usage": {}}
+def _gemini_body(finish_reason, blocked):
+    ratings = [{"category": "HARM_CATEGORY_HATE_SPEECH",
+                "probability": "HIGH", "blocked": blocked}]
+    return {"candidates": [{"content": {"parts": [], "role": "model"},
+                            "finishReason": finish_reason,
+                            "safetyRatings": ratings}],
+            "usageMetadata": {}}
 
 
-def test_r6_openai_refusal_diagnostic(monkeypatch):
-    """Content null + a refusal string + finish_reason 'refusal':
-    generate returns (None, error) and the diagnostic records
-    refusal_present=True and the finish_reason value. Refusal
-    text itself is never recorded."""
+def test_r6_gemini_blocked_diagnostic(monkeypatch):
+    """Empty parts + finishReason 'SAFETY' + a blocked safety
+    rating: generate returns (None, error) and the diagnostic
+    records blocked_present=True and the finishReason value.
+    Rating details themselves are never recorded."""
     import requests
-    svc = OpenAIService(api_key="fake-key", model="gpt-test")
+    svc = GeminiService(api_key="fake-key", model="gemini-test")
     monkeypatch.setattr(requests, "post",
-                        lambda *a, **k: _Resp(_openai_body("refusal", "I can't help with that.")))
+                        lambda *a, **k: _Resp(_gemini_body("SAFETY", True)))
     text, err = svc.generate([{"role": "user", "content": "hi"}])
     assert text is None and err
     struct = svc.last_diagnostic["choice_structure"]
-    assert struct["content_type"] == "NoneType"
-    assert struct["finish_reason"] == "refusal"
-    assert struct["refusal_present"] is True
-    assert struct["logprobs_present"] is False
-    assert "I can't help" not in str(svc.last_diagnostic)
+    assert struct["content_type"] == "list"
+    assert struct["finish_reason"] == "SAFETY"
+    assert struct["blocked_present"] is True
+    assert struct["text_present"] is False
+    assert "HATE_SPEECH" not in str(svc.last_diagnostic)
 
 
-def test_r6_openai_empty_stop_diagnostic(monkeypatch):
-    """Content null + no refusal + finish_reason 'stop': an empty
-    generation, recorded as such — refusal_present False."""
+def test_r6_gemini_empty_stop_diagnostic(monkeypatch):
+    """Empty parts + no block + finishReason 'STOP': an empty
+    generation, recorded as such — blocked_present False."""
     import requests
-    svc = OpenAIService(api_key="fake-key", model="gpt-test")
+    svc = GeminiService(api_key="fake-key", model="gemini-test")
     monkeypatch.setattr(requests, "post",
-                        lambda *a, **k: _Resp(_openai_body("stop", None)))
+                        lambda *a, **k: _Resp(_gemini_body("STOP", False)))
     text, err = svc.generate([{"role": "user", "content": "hi"}])
     assert text is None and err
     struct = svc.last_diagnostic["choice_structure"]
-    assert struct["finish_reason"] == "stop"
-    assert struct["refusal_present"] is False
+    assert struct["finish_reason"] == "STOP"
+    assert struct["blocked_present"] is False
 
 
-def test_r6_openai_text_extraction_unchanged(monkeypatch):
-    """A normal string content still extracts as the answer."""
+def test_r6_gemini_text_extraction_unchanged(monkeypatch):
+    """A normal text part still extracts as the answer."""
     import requests
-    svc = OpenAIService(api_key="fake-key", model="gpt-test")
-    body = {"choices": [{"finish_reason": "stop", "index": 0,
-                         "message": {"content": "Hello there.", "role": "assistant"}}],
-            "created": 1, "id": "x", "model": "gpt-test",
-            "object": "chat.completion", "usage": {}}
+    svc = GeminiService(api_key="fake-key", model="gemini-test")
+    body = {"candidates": [{"content": {"parts": [{"text": "Hello there."}],
+                                        "role": "model"},
+                            "finishReason": "STOP"}],
+            "usageMetadata": {}}
     monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp(body))
     text, err = svc.generate([{"role": "user", "content": "hi"}])
     assert text == "Hello there." and err is None
@@ -114,16 +114,16 @@ def test_r6_health_and_llm_status_agree(monkeypatch, tmp_path):
     try:
         mm._LAST_PROVIDER_DIAGNOSTIC.clear()
         monkeypatch.setenv("SHIBU_DIAGNOSTIC_DIR", str(tmp_path))
-        mm._record_provider_diagnostic("openai", {
-            "status": 200, "response_keys": ["choices"],
-            "choice_structure": {"content_type": "NoneType",
-                                 "finish_reason": "refusal",
-                                 "refusal_present": True,
-                                 "logprobs_present": False}})
+        mm._record_provider_diagnostic("gemini", {
+            "status": 200, "response_keys": ["candidates"],
+            "choice_structure": {"content_type": "list",
+                                 "finish_reason": "SAFETY",
+                                 "blocked_present": True,
+                                 "text_present": False}})
         diag = mm.ModelManager().status().get("provider_error")
-        assert diag is not None and diag["provider"] == "openai"
-        assert diag["choice_structure"]["finish_reason"] == "refusal"
-        assert diag["choice_structure"]["refusal_present"] is True
+        assert diag is not None and diag["provider"] == "gemini"
+        assert diag["choice_structure"]["finish_reason"] == "SAFETY"
+        assert diag["choice_structure"]["blocked_present"] is True
         client = app_module.app.test_client()
         health = client.get("/api/health").get_json()
         status = client.get("/api/llm/status").get_json()
