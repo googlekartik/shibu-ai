@@ -28,7 +28,6 @@ from chatbot.context import ConversationContext
 from chatbot.router import process_message
 from services.content_processing_engine import process_presentation
 from services.daily_task_service import build_daily_task_payload
-from services.meta_service import MetaService
 from services.model_manager import ModelManager
 from services.web_answer import summarise_web_results
 
@@ -160,11 +159,11 @@ def test_r3_documents_search_uses_sdk_documents_api(monkeypatch):
 # ---------------------------------------------------------------- F2
 def test_r3_daily_task_fallbacks_never_disclose_provider_failure(monkeypatch):
     class _Failing:
-        mode = "meta"
-        model_id = "m"
+        mode = "openai"
+        model_id = "gpt-4o-mini"
 
         def generate(self, *a, **k):
-            return None, "The Meta-compatible API returned a response in an unexpected format."
+            return None, "OpenAI returned HTTP 500: internal error."
 
     monkeypatch.setattr("services.daily_task_service.ModelManager", _Failing)
     for message in ("Plan my day with gym and study",
@@ -203,46 +202,11 @@ def test_r3_upload_failure_message_is_neutral(monkeypatch):
 
 
 # ---------------------------------------------------------------- F3
-def test_r3_meta_parses_every_remaining_envelope(monkeypatch):
+
+def test_r3_openai_diagnostic_is_status_and_keys_only(monkeypatch):
     import requests
 
-    def _run(body):
-        class _Resp:
-            status_code = 200
-
-            def json(self):
-                return body
-
-        monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp())
-        svc = MetaService(api_key="k", model="m")
-        text, err = svc.generate([{"role": "user", "content": "hi"}])
-        assert err is None, body
-        return text
-
-    # content as a list of parts inside message.content
-    assert _run({"choices": [{"message": {"content": [
-        {"type": "text", "text": "hello parts"}]}}]}) == "hello parts"
-    # choices[0].message.content as a plain list of strings
-    assert _run({"choices": [{"message": {"content": ["hello list"]}}]}) == "hello list"
-    # top-level data list
-    assert _run({"data": [{"content": "hello data"}]}) == "hello data"
-    # result / results envelopes
-    assert _run({"result": {"text": "hello result"}}) == "hello result"
-    assert _run({"results": [{"output_text": "hello results"}]}) == "hello results"
-    # response object with text
-    assert _run({"response": {"text": "hello response"}}) == "hello response"
-    # streaming-style delta fragments joined
-    assert _run({"choices": [{"delta": {"content": "hel"}},
-                             {"delta": {"content": "lo"}}]}) == "hello"
-    # bare JSON string body parsed once more
-    assert _run('{"choices": [{"message": {"content": "hello string"}}]}') == "hello string"
-    # nested content list inside a part
-    assert _run({"output": [{"content": [{"content": [
-        {"type": "text", "text": "hello nested"}]}]}]}) == "hello nested"
-
-
-def test_r3_meta_diagnostic_is_status_and_keys_only(monkeypatch):
-    import requests
+    from services.openai_service import OpenAIService
 
     class _Resp:
         status_code = 200
@@ -252,10 +216,10 @@ def test_r3_meta_diagnostic_is_status_and_keys_only(monkeypatch):
                     "usage": {"tokens": 9}}
 
     monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp())
-    svc = MetaService(api_key="k", model="m")
+    svc = OpenAIService(api_key="k", model="m")
     text, err = svc.generate([{"role": "user", "content": "hi"}])
     assert text is None
-    assert "HTTP 200" in err and "response keys: choices, usage" in err
+    assert err == "OpenAI returned a response in an unexpected format."
     # Keys only: the nested payload values never appear.
     assert "shape" not in err and "tokens" not in err
     assert svc.last_diagnostic["status"] == 200
@@ -269,7 +233,8 @@ def test_r3_meta_diagnostic_is_status_and_keys_only(monkeypatch):
         "finish_reason": None, "refusal_present": False,
         "logprobs_present": False}
     assert "shape" not in str(svc.last_diagnostic)
-    assert MetaService._response_keys(
+    from services.model_manager import _diagnostic_response_keys
+    assert _diagnostic_response_keys(
         {"id": "x", "output": []}) == ["id", "output"]
 
 
@@ -283,10 +248,12 @@ def test_r3_llm_status_exposes_provider_error_without_values(monkeypatch):
             return {"output": [{"content": [{"type": "weird"}]}]}
 
     monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp())
-    monkeypatch.setenv("META_API_KEY", "k")
-    monkeypatch.setenv("META_MODEL", "m")
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-test")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
     manager = ModelManager()
-    assert manager.mode == "meta"
+    assert manager.mode == "openai"
     text, err = manager.generate("hello")
     assert text is None
     status = ModelManager().status()
@@ -308,7 +275,7 @@ def test_r3_llm_status_exposes_provider_error_without_values(monkeypatch):
     assert "api_key" not in json.dumps(data).lower()
 
 
-def test_r3_meta_unparseable_falls_through_to_openai(monkeypatch):
+def test_r3_openai_unparseable_falls_through_to_hf(monkeypatch):
     import requests
 
     def _post(url, **kwargs):
@@ -316,22 +283,19 @@ def test_r3_meta_unparseable_falls_through_to_openai(monkeypatch):
             status_code = 200
 
             def json(self):
-                if "meta" in url:
+                if "openai" in url:
                     return {"choices": [{"message": {"content": {"weird": 1}}}]}
-                return {"choices": [{"message": {"content": "openai wins"}}]}
+                return {"choices": [{"message": {"content": "hf wins"}}]}
 
         return _Resp()
 
     monkeypatch.setattr(requests, "post", _post)
-    monkeypatch.setenv("META_API_KEY", "k")
-    monkeypatch.setenv("META_MODEL", "m")
-    monkeypatch.setenv("META_API_BASE", "https://meta.example/v1")
     monkeypatch.setenv("OPENAI_API_KEY", "k")
     monkeypatch.setenv("OPENAI_MODEL", "gpt-test")
-    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setenv("HF_TOKEN", "hf-token")
     monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
     text, err = ModelManager().generate("hello")
-    assert text == "openai wins"
+    assert text == "hf wins"
     assert err is None
 
 
@@ -390,8 +354,8 @@ def test_r3_summary_uses_stored_text_when_indexing_failed(monkeypatch):
 # ---------------------------------------------------------------- F6
 def test_r3_week_plan_template_is_day_by_day(monkeypatch):
     class _Failing:
-        mode = "meta"
-        model_id = "m"
+        mode = "openai"
+        model_id = "gpt-4o-mini"
 
         def generate(self, *a, **k):
             return None, "boom"

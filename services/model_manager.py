@@ -57,7 +57,7 @@ import shutil
 # Last failed provider attempt in this process, for /api/llm/status
 # diagnostics: provider + HTTP status + response top-level keys
 # ONLY. No values, no payload, no key. Updated by generate() on a
-# Meta failure; read (never written) by status(). ModelManager
+# provider failure; read (never written) by status(). ModelManager
 # instances are created per request, so process-level state is
 # what makes the diagnostic survive to the next status call.
 _LAST_PROVIDER_DIAGNOSTIC: dict = {}
@@ -99,6 +99,112 @@ def _provider_diagnostic() -> dict | None:
         return read_diagnostic("provider")
     except Exception:
         return None
+
+
+def _diagnostic_response_keys(data) -> list:
+    """Top-level keys of a response body, for diagnostics only.
+    A JSON-string body is parsed once; anything else yields []."""
+    if isinstance(data, str):
+        try:
+            import json
+            data = json.loads(data)
+        except Exception:
+            return []
+    if isinstance(data, dict):
+        return sorted(str(k) for k in data.keys())
+    return []
+
+
+def _diagnostic_choice_structure(data) -> dict | None:
+    """Structure ONLY of choices[0]: key names, the Python type
+    of message.content, and the distinct part "type" values when
+    content is a list. Plus the three facts that decide a
+    null-content failure: the finish_reason enum VALUE (a small
+    closed set: stop/length/refusal/content_filter/tool_calls),
+    whether message.refusal is a non-empty string, and whether
+    logprobs is present. No other values, no payload text, no
+    headers — so a live failure can be diagnosed from
+    /api/llm/status without exposing anything the provider
+    returned. Refusal TEXT is never recorded: it may contain
+    provider wording, and only its presence is diagnostic."""
+    if isinstance(data, str):
+        try:
+            import json
+            data = json.loads(data)
+        except Exception:
+            return None
+    if not isinstance(data, dict):
+        return None
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    first = choices[0]
+    if not isinstance(first, dict):
+        return {"choice_keys": [], "message_keys": None,
+                "content_type": type(first).__name__, "part_types": None,
+                "finish_reason": None, "refusal_present": False,
+                "logprobs_present": False}
+    message = first.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, list):
+        part_types = sorted({str(p.get("type")) for p in content
+                             if isinstance(p, dict) and p.get("type")})
+        content_type = "list"
+    elif content is None:
+        part_types = None
+        content_type = "NoneType"
+    else:
+        part_types = None
+        content_type = type(content).__name__
+    finish_reason = first.get("finish_reason")
+    refusal = message.get("refusal") if isinstance(message, dict) else None
+    return {
+        "choice_keys": sorted(str(k) for k in first.keys()),
+        "message_keys": sorted(str(k) for k in message.keys()) if isinstance(message, dict) else None,
+        "content_type": content_type,
+        "part_types": part_types,
+        # The finish_reason enum value is the decisive fact for a
+        # null-content 200: "refusal" means the provider refused,
+        # "stop" with no refusal means an empty generation.
+        "finish_reason": finish_reason if isinstance(finish_reason, str) else None,
+        "refusal_present": isinstance(refusal, str) and bool(refusal.strip()),
+        "logprobs_present": first.get("logprobs") is not None,
+    }
+
+
+def _diagnostic_usage_keys(data) -> dict | None:
+    """Key NAMES of the response "usage" object only — never
+    values. Nested dicts (e.g. completion_tokens_details) yield
+    their key names one level deep, under "nested". This reveals
+    whether the provider reports reasoning/thinking tokens.
+    Returns None when there is no usable usage object."""
+    if isinstance(data, str):
+        try:
+            import json
+            data = json.loads(data)
+        except Exception:
+            return None
+    if not isinstance(data, dict):
+        return None
+    usage = data.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    nested = {}
+    for key, value in usage.items():
+        if isinstance(value, dict):
+            nested[str(key)] = sorted(str(k) for k in value.keys())
+    return {"keys": sorted(str(k) for k in usage.keys()),
+            "nested": nested}
+
+
+def _diagnostic_from_body(resp_status, body) -> dict:
+    """Safe diagnostic for one call: HTTP status, top-level
+    response keys, the choices[0] structure, and the usage key
+    names. Never values."""
+    return {"status": resp_status,
+            "response_keys": _diagnostic_response_keys(body),
+            "choice_structure": _diagnostic_choice_structure(body),
+            "usage_keys": _diagnostic_usage_keys(body)}
 
 # RAM thresholds used for automatic selection (see module docstring).
 SMALL_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -170,16 +276,11 @@ class ModelManager:
     """One place for: select -> (download once) -> load -> generate.
 
     Modes, decided at construction from the environment:
-    - "meta":   META_API_KEY and META_MODEL are both set (opt-in only;
-              no default model). An OpenAI-compatible chat-completions
-              call to META_API_BASE (default https://api.meta.ai/v1).
-              Live use is UNVERIFIED — no key was available to test
-              with. When set, it is tried before OpenAI/HF; on failure
-              the next configured provider is tried (OpenAI, then the
-              HF router), mirroring the OpenAI mode's second chance.
     - "openai": OPENAI_API_KEY is set. ChatGPT API (gpt-4o-mini by
               default) — the fastest, most reliable hosted option, and
               the one used first when both OpenAI and HF keys are set.
+              On failure, the Hugging Face router is tried as a
+              second chance when HF_TOKEN is also set.
     - "api":   HF_TOKEN is set. Reuses the existing API service. No
               download, no local RAM cost. This is the recommended mode
               for a small PC.
@@ -193,12 +294,6 @@ class ModelManager:
     def __init__(self, token=None, model=None, use_local=None, openai_key=None):
         self.openai_key = (openai_key if openai_key is not None else os.environ.get("OPENAI_API_KEY", "")).strip()
         self.openai_model = (os.environ.get("OPENAI_MODEL", "").strip() or "gpt-4o-mini")
-        # Opt-in Meta-compatible provider: only when BOTH key and model
-        # are set. No default model is ever invented.
-        self.meta_key = os.environ.get("META_API_KEY", "").strip()
-        self.meta_model = os.environ.get("META_MODEL", "").strip()
-        self.meta_base = os.environ.get("META_API_BASE", "").strip() or "https://api.meta.ai/v1"
-        self.meta_enabled = bool(self.meta_key and self.meta_model)
         self.token = (token if token is not None else os.environ.get("HF_TOKEN", "")).strip()
         self.cloud_only = os.environ.get("CLOUD_ONLY", "").strip().lower() in ("1", "true", "yes")
         requested_local = (use_local if use_local is not None
@@ -214,12 +309,9 @@ class ModelManager:
         # even when the model itself exists. See _generate_api.
         self.provider = os.environ.get("HF_PROVIDER", "").strip()
         self.effective_model = None
+        self._last_api_diagnostic = None
         env_model = (model or os.environ.get("HF_MODEL", "")).strip()
-        if self.meta_enabled and not self.force_local:
-            self.mode = "meta"
-            self.model_id = self.meta_model
-            self.effective_model = self.meta_model
-        elif self.openai_key and not self.force_local:
+        if self.openai_key and not self.force_local:
             self.mode = "openai"
             self.model_id = self.openai_model
             self.effective_model = self.openai_model
@@ -250,8 +342,8 @@ class ModelManager:
         info = {
             "mode": self.mode,
             "model": self.model_id,
-            "loaded": self._model is not None or (self.mode == "api" and bool(self.token)) or (self.mode == "openai" and bool(self.openai_key)) or (self.mode == "meta" and self.meta_enabled),
-            "device": self._device if self.mode == "local" else ("api" if self.mode in ("api", "openai", "meta") else None),
+            "loaded": self._model is not None or (self.mode == "api" and bool(self.token)) or (self.mode == "openai" and bool(self.openai_key)),
+            "device": self._device if self.mode == "local" else ("api" if self.mode in ("api", "openai") else None),
             "ram_gb": round(ram, 1) if ram else None,
             "gpu": _has_gpu(),
             "cloud_only": self.cloud_only,
@@ -264,8 +356,7 @@ class ModelManager:
             if self.cloud_only:
                 info["how_to_enable"] = (
                     "This deployment is cloud-only. Set OPENAI_API_KEY for gpt-4o-mini, "
-                    "HF_TOKEN for Hugging Face hosted inference, or both META_API_KEY and "
-                    "META_MODEL for the opt-in Meta-compatible API, in the service environment.")
+                    "or HF_TOKEN for Hugging Face hosted inference, in the service environment.")
             else:
                 info["how_to_enable"] = (
                     "For the fastest answer, set OPENAI_API_KEY in .env (ChatGPT API, gpt-4o-mini). "
@@ -276,8 +367,6 @@ class ModelManager:
 
     def select(self):
         """Report the model that would be used, without downloading it."""
-        if self.mode == "meta":
-            return {"mode": "meta", "model": self.model_id, "note": "Opt-in Meta-compatible chat API (unverified live). No default model; META_MODEL must be set."}
         if self.mode == "openai":
             return {"mode": "openai", "model": self.model_id, "note": "ChatGPT API (OpenAI) — fast, no download, no provider routing."}
         if self.mode == "api":
@@ -296,8 +385,6 @@ class ModelManager:
         Download happens only here, only once (the Hub cache), and only
         when local mode was explicitly enabled.
         """
-        if self.mode == "meta":
-            return True, f"Meta-compatible API mode ready: {self.model_id} (opt-in; live use unverified)."
         if self.mode == "openai":
             return True, f"OpenAI API mode ready: {self.model_id} (ChatGPT API, fast response)."
         if self.mode == "api":
@@ -346,44 +433,6 @@ class ModelManager:
         so callers can fall back to the rule engine instead of showing a
         traceback or an invented answer.
         """
-        if self.mode == "meta":
-            from services.meta_service import MetaService, META_MIN_OUTPUT_TOKENS
-            svc = MetaService(api_key=self.meta_key, model=self.model_id, base=self.meta_base)
-            # Meta path only: floor the budget at META_MIN_OUTPUT_TOKENS.
-            # Live diagnostics showed finish_reason "length" with null
-            # visible content at 256 and at 1024, with reasoning tokens
-            # reported in usage — the reasoning model consumes the
-            # output cap with thinking tokens before producing visible
-            # content. The OpenAI/HF fallthrough calls below keep the
-            # caller's original budget unchanged.
-            meta_tokens = max(int(max_new_tokens or 0), META_MIN_OUTPUT_TOKENS)
-            text, err = svc.generate(messages, max_tokens=meta_tokens, temperature=temperature)
-            if text:
-                self.effective_model = self.model_id
-                return text, err
-            # Record the safe diagnostic (status + keys only) so
-            # /api/llm/status can explain the failure without
-            # exposing payload content.
-            _record_provider_diagnostic("meta", getattr(svc, "last_diagnostic", None) or
-                                        {"status": None, "response_keys": []})
-            # Provider fallthrough: a failed first provider must not
-            # end the answer when another configured provider can
-            # still answer. Try OpenAI next, then the Hugging Face
-            # router, in that order; only if all configured
-            # providers fail is the original Meta error returned,
-            # so the failure is never mislabelled.
-            if err and self.openai_key:
-                from services.openai_service import OpenAIService
-                oa = OpenAIService(api_key=self.openai_key, model=self.openai_model)
-                oa_text, _oa_err = oa.generate(messages, max_tokens=max_new_tokens, temperature=temperature)
-                if oa_text:
-                    self.effective_model = self.openai_model
-                    return oa_text, None
-            if err and self.token:
-                hf_text, _hf_err = self._generate_api(messages, max_new_tokens, temperature)
-                if hf_text:
-                    return hf_text, None
-            return text, err
         if self.mode == "openai":
             from services.openai_service import OpenAIService
             svc = OpenAIService(api_key=self.openai_key, model=self.model_id)
@@ -391,6 +440,11 @@ class ModelManager:
             if text:
                 self.effective_model = self.model_id
                 return text, err
+            # Record the safe diagnostic (status + keys only) so
+            # /api/llm/status can explain the failure without
+            # exposing payload content.
+            _record_provider_diagnostic("openai", getattr(svc, "last_diagnostic", None) or
+                                        {"status": None, "response_keys": []})
             # Second chance: an OpenAI quota/rate-limit error should
             # not kill the answer outright when a Hugging Face token
             # is also configured. Only then is the HF router tried;
@@ -400,9 +454,15 @@ class ModelManager:
                 hf_text, _hf_err = self._generate_api(messages, max_new_tokens, temperature)
                 if hf_text:
                     return hf_text, None
+                _record_provider_diagnostic("huggingface", self._last_api_diagnostic or
+                                            {"status": None, "response_keys": []})
             return text, err
         if self.mode == "api":
-            return self._generate_api(messages, max_new_tokens, temperature)
+            text, err = self._generate_api(messages, max_new_tokens, temperature)
+            if not text:
+                _record_provider_diagnostic("huggingface", self._last_api_diagnostic or
+                                            {"status": None, "response_keys": []})
+            return text, err
         if self.mode == "local":
             return self._generate_local(messages, max_new_tokens, temperature)
         return None, "No language model is enabled."
@@ -458,8 +518,14 @@ class ModelManager:
                     timeout=60)
             except Exception as exc:
                 return None, _plain_error(exc)
+            try:
+                _body = resp.json()
+            except Exception:
+                _body = None
+            if _body is not None:
+                self._last_api_diagnostic = _diagnostic_from_body(resp.status_code, _body)
             if resp.status_code == 200:
-                data = resp.json()
+                data = _body if isinstance(_body, dict) else {}
                 choices = data.get("choices") or []
                 if choices and choices[0].get("message", {}).get("content"):
                     self.effective_model = candidate

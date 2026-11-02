@@ -26,7 +26,6 @@ try:
 except OSError:
     pass
 for _key in ("PINECONE_API_KEY", "PINECONE_INDEX_NAME", "DEV_PANEL",
-             "META_API_KEY", "META_MODEL", "META_API_BASE",
              "OPENAI_API_KEY", "OPENAI_MODEL", "HF_TOKEN",
              "HF_USE_LOCAL", "HF_FORCE_LOCAL"):
     os.environ.pop(_key, None)
@@ -59,12 +58,12 @@ class _Resp:
         return self._payload
 
 
-def _meta_body(finish_reason, refusal):
+def _openai_body(finish_reason, refusal):
     return {"choices": [{"finish_reason": finish_reason, "index": 0,
                          "logprobs": None,
                          "message": {"content": None, "refusal": refusal,
                                      "role": "assistant"}}],
-            "created": 1, "id": "x", "model": "muse-spark-1.3",
+            "created": 1, "id": "x", "model": "gpt-test",
             "object": "chat.completion", "usage": {}}
 
 
@@ -82,16 +81,18 @@ def _failing_llm(monkeypatch):
 
 
 # ---------------------------------------------------------------- M7
-def test_r7_fresh_meta_failure_status_has_new_diagnostic_keys(monkeypatch, tmp_path):
-    """A fresh null-content Meta failure surfaces finish_reason,
+def test_r7_fresh_openai_failure_status_has_new_diagnostic_keys(monkeypatch, tmp_path):
+    """A fresh null-content OpenAI failure surfaces finish_reason,
     refusal_present and logprobs_present through ModelManager.status()
     — the exact read path behind /api/llm/status and /api/health."""
     import services.model_manager as mm
-    monkeypatch.setenv("META_API_KEY", "test-key")
-    monkeypatch.setenv("META_MODEL", "muse-spark-1.3")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-test")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
     monkeypatch.setenv("SHIBU_DIAGNOSTIC_DIR", str(tmp_path))
     monkeypatch.setattr(requests, "post",
-                        lambda *a, **k: _Resp(_meta_body("refusal", "I cannot help with that.")))
+                        lambda *a, **k: _Resp(_openai_body("refusal", "I cannot help with that.")))
     saved = dict(mm._LAST_PROVIDER_DIAGNOSTIC)
     mm._LAST_PROVIDER_DIAGNOSTIC.clear()
     try:
@@ -115,12 +116,14 @@ def test_r7_stale_sidecar_never_masks_fresh_diagnostic(monkeypatch, tmp_path):
     fresh diagnostic, and the sidecar is overwritten with it."""
     import json
     import services.model_manager as mm
-    monkeypatch.setenv("META_API_KEY", "test-key")
-    monkeypatch.setenv("META_MODEL", "muse-spark-1.3")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-test")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
     monkeypatch.setenv("SHIBU_DIAGNOSTIC_DIR", str(tmp_path))
     monkeypatch.setattr(requests, "post",
-                        lambda *a, **k: _Resp(_meta_body("refusal", "Nope.")))
-    old = {"provider": "meta", "status": 200, "response_keys": ["choices"],
+                        lambda *a, **k: _Resp(_openai_body("refusal", "Nope.")))
+    old = {"provider": "openai", "status": 200, "response_keys": ["choices"],
            "choice_structure": {"choice_keys": ["finish_reason", "index", "logprobs", "message"],
                                 "content_type": "NoneType",
                                 "message_keys": ["content", "refusal", "role"],
@@ -145,11 +148,13 @@ def test_r7_restart_reads_new_shape_from_sidecar_only(monkeypatch, tmp_path):
     """Simulated restart: process memory cleared, only the durable
     sidecar remains — the status read still shows the new keys."""
     import services.model_manager as mm
-    monkeypatch.setenv("META_API_KEY", "test-key")
-    monkeypatch.setenv("META_MODEL", "muse-spark-1.3")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-test")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
     monkeypatch.setenv("SHIBU_DIAGNOSTIC_DIR", str(tmp_path))
     monkeypatch.setattr(requests, "post",
-                        lambda *a, **k: _Resp(_meta_body("stop", None)))
+                        lambda *a, **k: _Resp(_openai_body("stop", None)))
     saved = dict(mm._LAST_PROVIDER_DIAGNOSTIC)
     mm._LAST_PROVIDER_DIAGNOSTIC.clear()
     try:

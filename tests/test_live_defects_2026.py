@@ -23,7 +23,6 @@ from services.code_service import generate_code, generate_code_for
 from services.content_processing_engine import process_presentation
 from services.daily_task_service import _friendly_error, build_daily_task_payload
 from services.math_service import MathService
-from services.meta_service import MetaService
 from services.web_answer import filter_results, format_web_answer
 
 
@@ -72,103 +71,57 @@ def test_d2_howto_web_answer_drops_film_and_book_pollution():
 
 
 # ---------------------------------------------------------------- D3
-def test_d3_meta_parses_each_plausible_response_shape():
-    shapes = [
-        {"choices": [{"message": {"content": "hello from choices"}}]},
-        {"choices": [{"text": "hello from text"}]},
-        {"output": [{"content": [{"type": "text", "text": "hello from output"}]}]},
-        {"output_text": "hello from output_text"},
-        {"content": [{"type": "text", "text": "hello from content"}]},
-        {"text": "hello from top level"},
-        {"answer": "hello from answer"},
-    ]
-    for data in shapes:
-        assert MetaService._extract_text(data).startswith("hello from")
-    assert MetaService._extract_text({"choices": []}) is None
-    assert MetaService._extract_text({"weird": {"nested": [1, 2]}}) is None
-    assert MetaService._extract_text({"choices": [{"message": {"content": ""}}]}) is None
 
 
-def test_d3_meta_unparseable_response_is_a_clean_error_without_payload(monkeypatch):
-    import requests
-
-    class _Resp:
-        status_code = 200
-
-        def json(self):
-            return {"choices": [{"message": {"content": {"unexpected": "shape", "secret": "xyz"}}}]}
-    monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp())
-    svc = MetaService(api_key="k", model="m")
-    text, err = svc.generate([{"role": "user", "content": "hi"}])
-    assert text is None
-    # Round 3: safe diagnostics only — HTTP status + top-level keys,
-    # never payload values.
-    assert err.startswith("The Meta-compatible API returned a response in an unexpected format")
-    assert "HTTP 200" in err and "response keys: choices" in err
-    assert "secret" not in err and "xyz" not in err
-
-
-def test_d3_meta_failure_falls_through_to_openai_then_hf(monkeypatch):
+def test_d3_openai_failure_falls_through_to_hf(monkeypatch):
     from services.model_manager import ModelManager
-    monkeypatch.setenv("META_API_KEY", "meta-key")
-    monkeypatch.setenv("META_MODEL", "meta-model")
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
 
-    class _Meta:
-        def __init__(self, *a, **k):
-            pass
-
-        def generate(self, *a, **k):
-            return None, "The Meta-compatible API returned a response in an unexpected format."
     class _OpenAI:
         def __init__(self, *a, **k):
             pass
 
         def generate(self, *a, **k):
-            return "OpenAI draft answer", None
-    monkeypatch.setattr("services.meta_service.MetaService", _Meta)
-    monkeypatch.setattr("services.openai_service.OpenAIService", _OpenAI)
-    manager = ModelManager()
-    assert manager.mode == "meta"
-    text, err = manager.generate([{"role": "user", "content": "plan my day"}])
-    assert text == "OpenAI draft answer" and err is None
-
-    # All providers fail: the original Meta error is returned, never
-    # mislabelled as another provider's failure.
-    class _FailOpenAI:
-        def __init__(self, *a, **k):
-            pass
-
-        def generate(self, *a, **k):
             return None, "OpenAI returned HTTP 429"
-    monkeypatch.setattr("services.openai_service.OpenAIService", _FailOpenAI)
+    class _HF:
+        pass
+    monkeypatch.setattr("services.openai_service.OpenAIService", _OpenAI)
     monkeypatch.setenv("HF_TOKEN", "hf-token")
+    monkeypatch.setattr(ModelManager, "_generate_api",
+                        lambda self, *a, **k: ("HF draft answer", None))
+    manager = ModelManager()
+    assert manager.mode == "openai"
+    text, err = manager.generate([{"role": "user", "content": "plan my day"}])
+    assert text == "HF draft answer" and err is None
+
+    # All providers fail: the original OpenAI error is returned, never
+    # mislabelled as another provider's failure.
     monkeypatch.setattr(ModelManager, "_generate_api",
                         lambda self, *a, **k: (None, "HF failed"))
     manager = ModelManager()
     text, err = manager.generate([{"role": "user", "content": "plan my day"}])
-    assert text is None and "Meta-compatible" in err
+    assert text is None and "OpenAI returned HTTP 429" in err
 
 
 def test_d3_fallback_template_never_discloses_provider_error(monkeypatch):
-    assert "Meta" not in _friendly_error(
-        "The Meta-compatible API returned a response in an unexpected format.")
-    assert _friendly_error("The Meta-compatible API returned a response in an unexpected format.") == \
+    assert "OpenAI" not in _friendly_error(
+        "OpenAI returned HTTP 500: internal error.")
+    assert _friendly_error("OpenAI returned HTTP 500: internal error.") == \
         "the language model could not draft this"
 
     class _StubManager:
-        mode = "meta"
-        model_id = "meta-model"
+        mode = "openai"
+        model_id = "gpt-4o-mini"
 
         def generate(self, *a, **k):
-            return None, "The Meta-compatible API returned a response in an unexpected format."
+            return None, "OpenAI returned HTTP 500: internal error."
     monkeypatch.setattr("services.daily_task_service.ModelManager", _StubManager)
     payload, _needs_web = build_daily_task_payload("Plan my day with gym and study", _ctx(), 0.0)
     assert payload is not None
-    assert "Meta" not in payload["response"]
-    assert "unexpected format" not in payload["response"]
+    assert "OpenAI" not in payload["response"]
+    assert "429" not in payload["response"]
     # Round 3: the template is delivered cleanly — no mention of
     # the language model, no failure disclosure at all.
     for forbidden in ("basic template", "could not draft", "not available",
@@ -458,11 +411,11 @@ def test_d16_no_evidence_message_depends_on_whether_documents_exist(flask_client
 # ---------------------------------------------------------------- D-C6
 def test_dc6_template_week_plan_has_no_quiz_block(monkeypatch):
     class _StubManager:
-        mode = "meta"
-        model_id = "meta-model"
+        mode = "openai"
+        model_id = "gpt-4o-mini"
 
         def generate(self, *a, **k):
-            return None, "The Meta-compatible API returned a response in an unexpected format."
+            return None, "OpenAI returned HTTP 500: internal error."
     monkeypatch.setattr("services.daily_task_service.ModelManager", _StubManager)
     payload, _needs_web = build_daily_task_payload(
         "Plan my week for the gym and study for an exam", _ctx(), 0.0)

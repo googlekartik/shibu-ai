@@ -1,9 +1,9 @@
 """Muse-style frontend + anime characters tests (2026): the five
 characters, the new layout markers, code-block rendering markers,
-identity wording, the opt-in Meta provider, in-chat character
-choice, and legacy avatar-id aliases. No network, no keys: the Meta
-provider is exercised only with a mocked HTTP response, and is
-inactive whenever its env keys are absent."""
+identity wording, the OpenAI provider chain, in-chat character
+choice, and legacy avatar-id aliases. No network, no keys: the
+OpenAI provider is exercised only with a mocked HTTP response, and
+is inactive whenever its env key is absent."""
 import os
 import sys
 from unittest import mock
@@ -11,8 +11,8 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import app as app_module
-from services.meta_service import MetaService
 from services.model_manager import ModelManager
+from services.openai_service import OpenAIService
 
 EXPECTED = [
     ("avatar-1", "Monkey D. Luffy", "avatars/avatar-1.svg"),
@@ -108,51 +108,48 @@ def test_profile_reports_character_name():
     assert me["avatar_url"].endswith("avatars/avatar-3.svg")
 
 
-def test_meta_provider_inactive_without_keys(monkeypatch):
-    for var in ("META_API_KEY", "META_MODEL", "OPENAI_API_KEY", "HF_TOKEN",
+def test_openai_provider_inactive_without_key(monkeypatch):
+    for var in ("OPENAI_API_KEY", "HF_TOKEN",
                 "HF_FORCE_LOCAL", "HF_USE_LOCAL"):
         monkeypatch.delenv(var, raising=False)
-    svc = MetaService()
+    svc = OpenAIService()
     assert svc.enabled is False
     text, err = svc.generate([{"role": "user", "content": "hi"}])
     assert text is None
-    assert "META_API_KEY" in err and "META_MODEL" in err
-    # Key alone is not enough: the model id must also be set.
-    monkeypatch.setenv("META_API_KEY", "test-key")
-    assert MetaService().enabled is False
-    assert ModelManager().mode != "meta"
+    assert "OPENAI_API_KEY" in err
+    assert ModelManager().mode != "openai"
 
 
-def test_meta_provider_mocked_success_and_manager_mode(monkeypatch):
-    for var in ("OPENAI_API_KEY", "HF_TOKEN", "HF_FORCE_LOCAL", "HF_USE_LOCAL"):
+def test_openai_provider_mocked_success_and_manager_mode(monkeypatch):
+    for var in ("HF_TOKEN", "HF_FORCE_LOCAL", "HF_USE_LOCAL"):
         monkeypatch.delenv(var, raising=False)
-    monkeypatch.setenv("META_API_KEY", "test-key")
-    monkeypatch.setenv("META_MODEL", "test-model")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
 
     class _Resp:
         status_code = 200
         text = "{}"
 
         def json(self):
-            return {"choices": [{"message": {"content": "Hello from Meta."}}]}
+            return {"choices": [{"message": {"content": "Hello from OpenAI."}}]}
 
     with mock.patch("requests.post", return_value=_Resp()) as post:
-        svc = MetaService()
+        svc = OpenAIService()
         assert svc.enabled is True
         text, err = svc.generate([{"role": "user", "content": "hi"}])
-        assert text == "Hello from Meta."
+        assert text == "Hello from OpenAI."
         assert err is None
-        assert post.call_args[0][0] == "https://api.meta.ai/v1/chat/completions"
-        assert post.call_args[1]["json"]["model"] == "test-model"
+        assert post.call_args[0][0] == "https://api.openai.com/v1/chat/completions"
+        assert post.call_args[1]["json"]["model"] == "gpt-4o-mini"
         mm = ModelManager()
-        assert mm.mode == "meta"
-        assert mm.model_id == "test-model"
+        assert mm.mode == "openai"
+        assert mm.model_id == "gpt-4o-mini"
         assert mm.status()["loaded"] is True
         text, err = mm.generate([{"role": "user", "content": "hi"}])
-        assert text == "Hello from Meta."
+        assert text == "Hello from OpenAI."
 
 
-def test_meta_provider_mocked_error_text(monkeypatch):
+def test_openai_provider_mocked_error_text(monkeypatch):
     class _Resp:
         status_code = 401
         text = "unauthorized"
@@ -161,11 +158,11 @@ def test_meta_provider_mocked_error_text(monkeypatch):
             return {"error": {"message": "bad key"}}
 
     with mock.patch("requests.post", return_value=_Resp()):
-        svc = MetaService(api_key="x", model="m")
+        svc = OpenAIService(api_key="zzkey", model="m")
         text, err = svc.generate([{"role": "user", "content": "hi"}])
         assert text is None
         assert "401" in err
-        assert "x" not in err  # the key value is never echoed
+        assert "zzkey" not in err  # the key value is never echoed
 
 
 def test_in_chat_character_choice_flow():

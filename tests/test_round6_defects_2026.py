@@ -17,7 +17,6 @@ try:
 except OSError:
     pass
 for _key in ("PINECONE_API_KEY", "PINECONE_INDEX_NAME", "DEV_PANEL",
-             "META_API_KEY", "META_MODEL", "META_API_BASE",
              "OPENAI_API_KEY", "OPENAI_MODEL", "HF_TOKEN",
              "HF_USE_LOCAL", "HF_FORCE_LOCAL"):
     os.environ.pop(_key, None)
@@ -32,7 +31,7 @@ from chatbot.router import process_message
 from services.content_processing_engine import process_presentation
 from services.content_structuring_engine import structure
 from services.daily_task_service import _template_write, build_daily_task_payload
-from services.meta_service import MetaService
+from services.openai_service import OpenAIService
 
 
 def _ctx(display_name=""):
@@ -51,24 +50,24 @@ class _Resp:
 
 
 # ---------------------------------------------------------------- M6
-def _meta_body(finish_reason, refusal):
+def _openai_body(finish_reason, refusal):
     return {"choices": [{"finish_reason": finish_reason, "index": 0,
                          "logprobs": None,
                          "message": {"content": None, "refusal": refusal,
                                      "role": "assistant"}}],
-            "created": 1, "id": "x", "model": "muse-spark-1.3",
+            "created": 1, "id": "x", "model": "gpt-test",
             "object": "chat.completion", "usage": {}}
 
 
-def test_r6_meta_refusal_diagnostic(monkeypatch):
+def test_r6_openai_refusal_diagnostic(monkeypatch):
     """Content null + a refusal string + finish_reason 'refusal':
     generate returns (None, error) and the diagnostic records
     refusal_present=True and the finish_reason value. Refusal
     text itself is never recorded."""
     import requests
-    svc = MetaService(api_key="fake-key", model="muse-spark-1.3")
+    svc = OpenAIService(api_key="fake-key", model="gpt-test")
     monkeypatch.setattr(requests, "post",
-                        lambda *a, **k: _Resp(_meta_body("refusal", "I can't help with that.")))
+                        lambda *a, **k: _Resp(_openai_body("refusal", "I can't help with that.")))
     text, err = svc.generate([{"role": "user", "content": "hi"}])
     assert text is None and err
     struct = svc.last_diagnostic["choice_structure"]
@@ -79,13 +78,13 @@ def test_r6_meta_refusal_diagnostic(monkeypatch):
     assert "I can't help" not in str(svc.last_diagnostic)
 
 
-def test_r6_meta_empty_stop_diagnostic(monkeypatch):
+def test_r6_openai_empty_stop_diagnostic(monkeypatch):
     """Content null + no refusal + finish_reason 'stop': an empty
     generation, recorded as such — refusal_present False."""
     import requests
-    svc = MetaService(api_key="fake-key", model="muse-spark-1.3")
+    svc = OpenAIService(api_key="fake-key", model="gpt-test")
     monkeypatch.setattr(requests, "post",
-                        lambda *a, **k: _Resp(_meta_body("stop", None)))
+                        lambda *a, **k: _Resp(_openai_body("stop", None)))
     text, err = svc.generate([{"role": "user", "content": "hi"}])
     assert text is None and err
     struct = svc.last_diagnostic["choice_structure"]
@@ -93,13 +92,13 @@ def test_r6_meta_empty_stop_diagnostic(monkeypatch):
     assert struct["refusal_present"] is False
 
 
-def test_r6_meta_text_extraction_unchanged(monkeypatch):
+def test_r6_openai_text_extraction_unchanged(monkeypatch):
     """A normal string content still extracts as the answer."""
     import requests
-    svc = MetaService(api_key="fake-key", model="muse-spark-1.3")
+    svc = OpenAIService(api_key="fake-key", model="gpt-test")
     body = {"choices": [{"finish_reason": "stop", "index": 0,
                          "message": {"content": "Hello there.", "role": "assistant"}}],
-            "created": 1, "id": "x", "model": "muse-spark-1.3",
+            "created": 1, "id": "x", "model": "gpt-test",
             "object": "chat.completion", "usage": {}}
     monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp(body))
     text, err = svc.generate([{"role": "user", "content": "hi"}])
@@ -115,14 +114,14 @@ def test_r6_health_and_llm_status_agree(monkeypatch, tmp_path):
     try:
         mm._LAST_PROVIDER_DIAGNOSTIC.clear()
         monkeypatch.setenv("SHIBU_DIAGNOSTIC_DIR", str(tmp_path))
-        mm._record_provider_diagnostic("meta", {
+        mm._record_provider_diagnostic("openai", {
             "status": 200, "response_keys": ["choices"],
             "choice_structure": {"content_type": "NoneType",
                                  "finish_reason": "refusal",
                                  "refusal_present": True,
                                  "logprobs_present": False}})
         diag = mm.ModelManager().status().get("provider_error")
-        assert diag is not None and diag["provider"] == "meta"
+        assert diag is not None and diag["provider"] == "openai"
         assert diag["choice_structure"]["finish_reason"] == "refusal"
         assert diag["choice_structure"]["refusal_present"] is True
         client = app_module.app.test_client()

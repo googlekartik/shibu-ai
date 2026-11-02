@@ -21,9 +21,6 @@ except OSError:
 os.environ.pop("PINECONE_API_KEY", None)
 os.environ.pop("PINECONE_INDEX_NAME", None)
 os.environ.pop("DEV_PANEL", None)
-os.environ.pop("META_API_KEY", None)
-os.environ.pop("META_MODEL", None)
-os.environ.pop("META_API_BASE", None)
 os.environ.pop("OPENAI_API_KEY", None)
 os.environ.pop("OPENAI_MODEL", None)
 os.environ.pop("HF_TOKEN", None)
@@ -88,52 +85,51 @@ def _clear_diagnostics(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------- M1
-def test_r5_meta_mode_day_plan_uses_model_text(monkeypatch):
-    """Meta mode is attempted exactly like OpenAI: a mocked
-    ModelManager in meta mode returning text -> the day plan uses
-    the model draft, not the template."""
+def test_r5_openai_mode_day_plan_uses_model_text(monkeypatch):
+    """A mocked ModelManager in openai mode returning text -> the
+    day plan uses the model draft, not the template."""
 
-    class _MetaOK:
-        mode = "meta"
-        model_id = "muse-spark-1.3"
-        effective_model = "muse-spark-1.3"
+    class _OpenAIOK:
+        mode = "openai"
+        model_id = "gpt-4o-mini"
+        effective_model = "gpt-4o-mini"
 
         def generate(self, *a, **k):
             return "MODEL PLAN: gym at 6pm, study at 8pm.", None
 
-    monkeypatch.setattr("services.daily_task_service.ModelManager", _MetaOK)
+    monkeypatch.setattr("services.daily_task_service.ModelManager", _OpenAIOK)
     payload, _needs_web = build_daily_task_payload(
         "Plan my day: I work 9 to 5, want gym and study time", _ctx(), 0.0)
     assert "MODEL PLAN" in payload["response"]
     assert "Language model" in payload["tool"]
 
 
-def test_r5_meta_failure_records_diagnostic_and_survives_restart(monkeypatch, tmp_path):
-    """A Meta failure (200 envelope, empty content — the shape seen
-    live) -> template + a non-null provider_error, and the
-    diagnostic survives a simulated process restart (module state
-    cleared) via the durable sidecar."""
+def test_r5_openai_failure_records_diagnostic_and_survives_restart(monkeypatch, tmp_path):
+    """An OpenAI failure (200 envelope, empty content) -> template
+    + a non-null provider_error, and the diagnostic survives a
+    simulated process restart (module state cleared) via the
+    durable sidecar."""
     import requests
     import services.model_manager as mm
     _clear_diagnostics(monkeypatch, tmp_path)
-    monkeypatch.setenv("META_API_KEY", "fake-key")
-    monkeypatch.setenv("META_MODEL", "muse-spark-1.3")
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-key")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-test")
     monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
     payload = {"choices": [{"message": {"role": "assistant", "content": ""}}],
-               "created": 1, "id": "x", "model": "muse-spark-1.3",
+               "created": 1, "id": "x", "model": "gpt-test",
                "object": "chat.completion", "usage": {}}
     monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp(payload))
     result, _needs_web = build_daily_task_payload(
         "Plan my day: I work 9 to 5, want gym and study time", _ctx(), 0.0)
     assert "Your day plan:" in result["response"]
     diag = mm.ModelManager().status().get("provider_error")
-    assert diag is not None and diag["provider"] == "meta" and diag["status"] == 200
+    assert diag is not None and diag["provider"] == "openai" and diag["status"] == 200
     # Simulate a process restart: in-memory state is gone.
     mm._LAST_PROVIDER_DIAGNOSTIC.clear()
     diag_after_restart = mm.ModelManager().status().get("provider_error")
     assert diag_after_restart is not None
-    assert diag_after_restart["provider"] == "meta"
+    assert diag_after_restart["provider"] == "openai"
     assert diag_after_restart["status"] == 200
 
 
@@ -143,8 +139,8 @@ def test_r5_generate_exception_records_diagnostic(monkeypatch, tmp_path):
     recorded for /api/llm/status."""
 
     class _Raising:
-        mode = "meta"
-        model_id = "m"
+        mode = "openai"
+        model_id = "gpt-4o-mini"
 
         def generate(self, *a, **k):
             raise RuntimeError("provider surprise")
@@ -156,7 +152,7 @@ def test_r5_generate_exception_records_diagnostic(monkeypatch, tmp_path):
         "Plan my day: I work 9 to 5, want gym and study time", _ctx(), 0.0)
     assert "Your day plan:" in payload["response"]
     diag = mm.ModelManager().status().get("provider_error")
-    assert diag is not None and diag["provider"] == "meta"
+    assert diag is not None and diag["provider"] == "openai"
 
 
 # ---------------------------------------------------------------- P1

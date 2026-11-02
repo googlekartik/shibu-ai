@@ -20,11 +20,34 @@ in .gitignore, so it is never pushed to GitHub).
 import os
 
 
+def _safe_body(resp):
+    """Parsed JSON body of a response, or None when unparsable."""
+    try:
+        return resp.json()
+    except Exception:
+        return None
+
+
+def _diagnostic_for(status, body):
+    """Structure-only diagnostic for one response (never values)."""
+    try:
+        from services.model_manager import _diagnostic_from_body
+        return _diagnostic_from_body(status, body)
+    except Exception:
+        return {"status": status, "response_keys": [],
+                "choice_structure": None, "usage_keys": None}
+
+
 class OpenAIService:
     def __init__(self, api_key=None, model=None):
         self.api_key = (api_key if api_key is not None else os.environ.get("OPENAI_API_KEY", "")).strip()
         self.model = (model or os.environ.get("OPENAI_MODEL", "")).strip() or "gpt-4o-mini"
         self.enabled = bool(self.api_key)
+        # Structure-only diagnostic of the last HTTP response
+        # (status + response key names + choices[0] structure + usage
+        # key names; never values), for /api/llm/status. None when
+        # no HTTP response was received.
+        self.last_diagnostic = None
 
     def status(self):
         # Safe: never includes the key.
@@ -46,14 +69,17 @@ class OpenAIService:
             if resp.status_code == 200:
                 data = resp.json()
                 choices = data.get("choices") or []
-                if choices and choices[0].get("message", {}).get("content"):
-                    return choices[0]["message"]["content"].strip(), None
+                content = choices[0].get("message", {}).get("content") if choices else None
+                if isinstance(content, str) and content:
+                    return content.strip(), None
+                self.last_diagnostic = _diagnostic_for(resp.status_code, data)
                 return None, "OpenAI returned a response in an unexpected format."
             try:
                 err = resp.json().get("error", {})
                 msg = err.get("message", "") if isinstance(err, dict) else str(err)
             except Exception:
                 msg = resp.text[:300]
+            self.last_diagnostic = _diagnostic_for(resp.status_code, _safe_body(resp))
             code = resp.status_code
             if code == 401:
                 return None, f"OpenAI returned HTTP 401: {msg} Your OPENAI_API_KEY is invalid or expired. Create a new key at platform.openai.com and set it in .env / the cloud dashboard."

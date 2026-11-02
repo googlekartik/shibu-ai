@@ -28,7 +28,6 @@ import app as app_module
 from chatbot.context import ConversationContext
 from chatbot.router import process_message
 from services.content_processing_engine import process_presentation
-from services.meta_service import MetaService
 from services.model_manager import ModelManager
 
 FORBIDDEN = ("could not draft", "not available", "Pinecone", "400",
@@ -52,81 +51,12 @@ class _Resp:
         return self._payload
 
 
-def _meta_post(payload):
+def _openai_post(payload):
     import requests
     return lambda *a, **k: _Resp(payload)
 
 
-# ---------------------------------------------------------------- M1
-def test_r4_meta_content_parts_output_text_skips_reasoning(monkeypatch):
-    """Content as parts: output_text is read, reasoning/refusal
-    parts are skipped, never leaked into the answer."""
-    import requests
-    payload = {"choices": [{"message": {"content": [
-        {"type": "reasoning", "text": "SECRET REASONING"},
-        {"type": "output_text", "text": "Visible answer"},
-        {"type": "refusal", "text": "SECRET REFUSAL"}]}}]}
-    monkeypatch.setattr(requests, "post", _meta_post(payload))
-    svc = MetaService(api_key="k", model="m")
-    text, err = svc.generate([{"role": "user", "content": "hi"}])
-    assert text == "Visible answer"
-    assert err is None
-    assert "SECRET" not in (text or "")
-
-
-def test_r4_meta_content_parts_input_text(monkeypatch):
-    import requests
-    payload = {"choices": [{"message": {"content": [
-        {"type": "input_text", "text": "Part one "},
-        {"type": "text", "text": "part two"}]}}]}
-    monkeypatch.setattr(requests, "post", _meta_post(payload))
-    svc = MetaService(api_key="k", model="m")
-    text, _err = svc.generate([{"role": "user", "content": "hi"}])
-    assert text == "Part one part two"
-
-
-def test_r4_meta_content_null_falls_back_to_message_text(monkeypatch):
-    import requests
-    payload = {"choices": [{"message": {"content": None, "text": "Fallback answer"}}]}
-    monkeypatch.setattr(requests, "post", _meta_post(payload))
-    svc = MetaService(api_key="k", model="m")
-    text, _err = svc.generate([{"role": "user", "content": "hi"}])
-    assert text == "Fallback answer"
-
-
-def test_r4_meta_choice_without_message_uses_text_field(monkeypatch):
-    import requests
-    payload = {"choices": [{"text": "Choice level text"}]}
-    monkeypatch.setattr(requests, "post", _meta_post(payload))
-    svc = MetaService(api_key="k", model="m")
-    text, _err = svc.generate([{"role": "user", "content": "hi"}])
-    assert text == "Choice level text"
-
-
-def test_r4_meta_delta_fragments_are_joined(monkeypatch):
-    import requests
-    payload = {"choices": [{"delta": {"content": [
-        {"type": "text", "text": "Hel"},
-        {"type": "text", "text": "lo"}]}, "finish_reason": "stop"}]}
-    monkeypatch.setattr(requests, "post", _meta_post(payload))
-    svc = MetaService(api_key="k", model="m")
-    text, _err = svc.generate([{"role": "user", "content": "hi"}])
-    assert text == "Hello"
-
-
-def test_r4_meta_empty_content_is_not_success(monkeypatch):
-    """An empty-string content must not count as a generated
-    answer: fallthrough, not a blank reply."""
-    import requests
-    payload = {"choices": [{"message": {"content": ""}}]}
-    monkeypatch.setattr(requests, "post", _meta_post(payload))
-    svc = MetaService(api_key="k", model="m")
-    text, err = svc.generate([{"role": "user", "content": "hi"}])
-    assert text is None
-    assert err
-
-
-def test_r4_meta_diagnostic_records_choice_structure_without_values(monkeypatch):
+def test_r4_openai_diagnostic_records_choice_structure_without_values(monkeypatch):
     """A response whose part text lives under an unhandled key
     still fails, but the diagnostic proves the structure: part
     type output_text, content a list — and no payload values."""
@@ -134,9 +64,11 @@ def test_r4_meta_diagnostic_records_choice_structure_without_values(monkeypatch)
     payload = {"choices": [{"message": {"content": [
         {"type": "output_text", "value": "SECRET VALUE TEXT"}]}}],
                "usage": {"tokens": 7}}
-    monkeypatch.setattr(requests, "post", _meta_post(payload))
-    monkeypatch.setenv("META_API_KEY", "k")
-    monkeypatch.setenv("META_MODEL", "m")
+    monkeypatch.setattr(requests, "post", _openai_post(payload))
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-test")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
     manager = ModelManager()
     text, err = manager.generate("hello")
     assert text is None
@@ -419,11 +351,11 @@ def test_r4_email_template_is_fluent_multiline(monkeypatch):
     lines; 'leave tomorrow', never 'on tomorrow'; the signature
     is not a bullet."""
     class _Failing:
-        mode = "meta"
-        model_id = "m"
+        mode = "openai"
+        model_id = "gpt-4o-mini"
 
         def generate(self, *a, **k):
-            return None, "The Meta-compatible API returned a response in an unexpected format."
+            return None, "OpenAI returned HTTP 500: internal error."
 
     monkeypatch.setattr("services.daily_task_service.ModelManager", _Failing)
     from services.daily_task_service import build_daily_task_payload

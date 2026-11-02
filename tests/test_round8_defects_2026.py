@@ -1,15 +1,14 @@
-"""Round-8 regression tests (2026-11-02): Meta token budget raised to
-1024 after the live diagnostic showed finish_reason "length" with
-null visible content at 256, plus the structure-only usage_keys
-diagnostic (key names only — never values). Round 9 superseded the
-1024 floor with 8192 plus reasoning_effort; the two request-body
-tests below were updated to the new intended values."""
+"""Round-8 regression tests (2026-11-02): structure-only usage_keys
+diagnostic (key names only — never values) for provider replies,
+preserved after the Meta provider integration was removed: the
+diagnostic machinery is provider-agnostic and now exercised
+through the OpenAI service, the first provider in the chain."""
 
 import json
 
 import pytest
 
-from services.meta_service import MetaService
+from services.openai_service import OpenAIService
 
 
 class _Resp:
@@ -28,22 +27,22 @@ def _length_body():
                          "logprobs": None,
                          "message": {"content": None, "refusal": None,
                                      "role": "assistant"}}],
-            "created": 1, "id": "x", "model": "muse-spark-1.3",
+            "created": 1, "id": "x", "model": "gpt-test",
             "object": "chat.completion",
             "usage": {"prompt_tokens": 12345, "completion_tokens": 678,
                       "total_tokens": 13023,
                       "completion_tokens_details": {
-                          "reasoning_tokens": 678,
+                          "thinking_tokens": 678,
                           "accepted_prediction_tokens": 0}}}
 
 
-def test_r8_meta_length_diagnostic_records_usage_keys(monkeypatch):
+def test_r8_openai_length_diagnostic_records_usage_keys(monkeypatch):
     """finish_reason "length" + null content: the diagnostic records
     the finish_reason value, refusal_present False, and usage_keys
     with key NAMES only — the token counts (12345/678/13023) must
     never appear in the diagnostic."""
     import requests
-    svc = MetaService(api_key="fake-key", model="muse-spark-1.3")
+    svc = OpenAIService(api_key="fake-key", model="gpt-test")
     monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp(_length_body()))
     text, err = svc.generate([{"role": "user", "content": "Plan my day"}])
     assert text is None and err
@@ -55,20 +54,20 @@ def test_r8_meta_length_diagnostic_records_usage_keys(monkeypatch):
         "keys": ["completion_tokens", "completion_tokens_details",
                  "prompt_tokens", "total_tokens"],
         "nested": {"completion_tokens_details": [
-            "accepted_prediction_tokens", "reasoning_tokens"]}}
+            "accepted_prediction_tokens", "thinking_tokens"]}}
     dumped = json.dumps(svc.last_diagnostic)
     for value in ("12345", "678", "13023"):
         assert value not in dumped
 
 
-def test_r8_meta_text_extraction_unchanged(monkeypatch):
+def test_r8_openai_text_extraction_unchanged(monkeypatch):
     """A normal string content still extracts as the answer, and a
     usage object does not disturb it."""
     import requests
-    svc = MetaService(api_key="fake-key", model="muse-spark-1.3")
+    svc = OpenAIService(api_key="fake-key", model="gpt-test")
     body = {"choices": [{"finish_reason": "stop", "index": 0,
                          "message": {"content": "Hello there.", "role": "assistant"}}],
-            "created": 1, "id": "x", "model": "muse-spark-1.3",
+            "created": 1, "id": "x", "model": "gpt-test",
             "object": "chat.completion",
             "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}}
     monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp(body))
@@ -76,12 +75,10 @@ def test_r8_meta_text_extraction_unchanged(monkeypatch):
     assert text == "Hello there." and err is None
 
 
-def test_r8_meta_request_carries_8192_tokens(monkeypatch):
-    """The default call (no explicit budget) sends max_tokens 8192,
-    and an explicit small budget is floored to 8192 at the Meta
-    boundary — no Meta call may be starved below the floor again.
-    (Round 9 raised the floor from 1024 to 8192; the request now
-    also carries max_completion_tokens and reasoning_effort.)"""
+def test_r8_openai_request_carries_caller_budget_unchanged(monkeypatch):
+    """The OpenAI request carries the caller's budget verbatim: the
+    default 256, and an explicit small budget, are sent unchanged —
+    no provider-specific floor or alias field is applied."""
     import requests
     captured = {}
 
@@ -92,30 +89,28 @@ def test_r8_meta_request_carries_8192_tokens(monkeypatch):
                       "created": 1, "id": "x", "model": "m",
                       "object": "chat.completion", "usage": {}})
 
-    svc = MetaService(api_key="fake-key", model="m")
+    svc = OpenAIService(api_key="fake-key", model="m")
     monkeypatch.setattr(requests, "post", _fake_post)
-    monkeypatch.delenv("META_REASONING_EFFORT", raising=False)
     svc.generate([{"role": "user", "content": "hi"}])
-    assert captured["max_tokens"] == 8192
-    assert captured["max_completion_tokens"] == 8192
-    assert captured["reasoning_effort"] == "low"
-    svc.generate([{"role": "user", "content": "hi"}], max_tokens=256)
-    assert captured["max_tokens"] == 8192
-    assert captured["max_completion_tokens"] == 8192
+    assert captured["max_tokens"] == 256
+    # No provider-specific extra fields are sent.
+    assert set(captured) <= {"model", "messages", "max_tokens", "temperature"}
+    svc.generate([{"role": "user", "content": "hi"}], max_tokens=64)
+    assert captured["max_tokens"] == 64
 
 
-def test_r8_manager_meta_branch_floors_small_budget(monkeypatch, tmp_path):
-    """A caller passing max_new_tokens=64 through ModelManager still
-    sends 8192 to the Meta API; the diagnostic still flows through
-    to status() with the new usage_keys field."""
+def test_r8_manager_openai_branch_passes_budget_and_records_diagnostic(monkeypatch, tmp_path):
+    """A caller passing max_new_tokens=64 through ModelManager sends
+    64 to the OpenAI API; the diagnostic still flows through to
+    status() with the usage_keys field."""
     import requests
     import services.model_manager as mm
     saved = dict(mm._LAST_PROVIDER_DIAGNOSTIC)
     monkeypatch.setenv("SHIBU_DIAGNOSTIC_DIR", str(tmp_path))
-    monkeypatch.setenv("META_API_KEY", "fake-key")
-    monkeypatch.setenv("META_MODEL", "muse-spark-1.3")
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-key")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-test")
     monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
     captured = {}
 
     def _fake_post(url, headers=None, json=None, timeout=None):
@@ -125,20 +120,21 @@ def test_r8_manager_meta_branch_floors_small_budget(monkeypatch, tmp_path):
     monkeypatch.setattr(requests, "post", _fake_post)
     try:
         manager = mm.ModelManager()
-        assert manager.mode == "meta"
+        assert manager.mode == "openai"
         text, err = manager.generate([{"role": "user", "content": "Plan my day"}],
                                      max_new_tokens=64)
         assert text is None and err
-        assert captured["max_tokens"] == 8192
+        assert captured["max_tokens"] == 64
         status = mm.ModelManager().status()
         error = status["provider_error"]
+        assert error["provider"] == "openai"
         assert error["choice_structure"]["finish_reason"] == "length"
         assert error["usage_keys"]["keys"] == [
             "completion_tokens", "completion_tokens_details",
             "prompt_tokens", "total_tokens"]
         assert error["usage_keys"]["nested"] == {
             "completion_tokens_details": [
-                "accepted_prediction_tokens", "reasoning_tokens"]}
+                "accepted_prediction_tokens", "thinking_tokens"]}
     finally:
         mm._LAST_PROVIDER_DIAGNOSTIC.clear()
         mm._LAST_PROVIDER_DIAGNOSTIC.update(saved)
@@ -148,7 +144,7 @@ def test_r8_usage_keys_absent_when_no_usage_object(monkeypatch):
     """A body with no "usage" object yields usage_keys None — never
     an invented structure."""
     import requests
-    svc = MetaService(api_key="fake-key", model="m")
+    svc = OpenAIService(api_key="fake-key", model="m")
     body = {"choices": [{"finish_reason": "stop", "index": 0,
                          "message": {"content": None, "role": "assistant"}}],
             "created": 1, "id": "x", "model": "m",
@@ -163,7 +159,7 @@ def test_r8_usage_keys_nested_non_dict_ignored(monkeypatch):
     """A nested non-dict usage value (e.g. a string) is a key name
     only; it does not appear under "nested"."""
     import requests
-    svc = MetaService(api_key="fake-key", model="m")
+    svc = OpenAIService(api_key="fake-key", model="m")
     body = {"choices": [{"finish_reason": "stop", "index": 0,
                          "message": {"content": None, "role": "assistant"}}],
             "created": 1, "id": "x", "model": "m",
