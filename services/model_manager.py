@@ -73,6 +73,9 @@ def _record_provider_diagnostic(provider: str, diagnostic) -> None:
             # Structure only (key names, content type, part types):
             # _choice_structure never contains response values.
             "choice_structure": diagnostic.get("choice_structure"),
+            # Usage key names only (never values): reveals whether
+            # the provider reports reasoning/thinking tokens.
+            "usage_keys": diagnostic.get("usage_keys"),
         })
         # Durable copy: process memory is wiped when the host
         # restarts the service, which made /api/llm/status report
@@ -346,7 +349,14 @@ class ModelManager:
         if self.mode == "meta":
             from services.meta_service import MetaService
             svc = MetaService(api_key=self.meta_key, model=self.model_id, base=self.meta_base)
-            text, err = svc.generate(messages, max_tokens=max_new_tokens, temperature=temperature)
+            # Meta path only: floor the budget at 1024. Live
+            # diagnostics showed finish_reason "length" with null
+            # visible content at 256 — the budget was consumed
+            # before any visible content was produced. The
+            # OpenAI/HF fallthrough calls below keep the caller's
+            # original budget unchanged.
+            meta_tokens = max(int(max_new_tokens or 0), 1024)
+            text, err = svc.generate(messages, max_tokens=meta_tokens, temperature=temperature)
             if text:
                 self.effective_model = self.model_id
                 return text, err

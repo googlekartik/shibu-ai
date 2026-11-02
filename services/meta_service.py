@@ -274,26 +274,66 @@ class MetaService:
         }
 
     @staticmethod
+    def _usage_keys(data) -> dict | None:
+        """Key NAMES of the response "usage" object only — never
+        values. Nested dicts (e.g. completion_tokens_details) yield
+        their key names one level deep, under "nested". This reveals
+        whether the provider reports reasoning/thinking tokens,
+        which decides why a 200 reply can carry null content with
+        finish_reason "length". Returns None when there is no
+        usable usage object."""
+        if isinstance(data, str):
+            try:
+                import json
+                data = json.loads(data)
+            except Exception:
+                return None
+        if not isinstance(data, dict):
+            return None
+        usage = data.get("usage")
+        if not isinstance(usage, dict):
+            return None
+        nested = {}
+        for key, value in usage.items():
+            if isinstance(value, dict):
+                nested[str(key)] = sorted(str(k) for k in value.keys())
+        return {"keys": sorted(str(k) for k in usage.keys()),
+                "nested": nested}
+
+    @staticmethod
     def _diagnostic(resp_status, body) -> dict:
         """Safe diagnostic for one call: HTTP status, top-level
-        response keys, and the choices[0] structure. Never values."""
+        response keys, the choices[0] structure, and the usage key
+        names. Never values."""
         return {"status": resp_status,
                 "response_keys": MetaService._response_keys(body),
-                "choice_structure": MetaService._choice_structure(body)}
+                "choice_structure": MetaService._choice_structure(body),
+                "usage_keys": MetaService._usage_keys(body)}
 
-    def generate(self, messages, max_tokens=256, temperature=0.7):
+    def generate(self, messages, max_tokens=1024, temperature=0.7):
         """Return (text, error). text is None on failure.
 
         Every failure records self.last_diagnostic = {status,
-        response_keys}: status + top-level keys only, never values.
-        Error strings carry the same two facts plus plain guidance
-        written here — never server message text, which could
-        contain payload details.
+        response_keys, choice_structure, usage_keys}: structure and
+        key names only, never values. Error strings carry the same
+        facts plus plain guidance written here — never server
+        message text, which could contain payload details.
+
+        Default max_tokens is 1024: live diagnostics showed the
+        model stopping for "length" with null visible content at
+        256, i.e. the budget was consumed before any visible
+        content was produced.
         """
         if not self.enabled:
             self.last_diagnostic = {"status": None, "response_keys": [],
-                                    "choice_structure": None}
+                                    "choice_structure": None,
+                                    "usage_keys": None}
             return None, "Meta API is not configured (set both META_API_KEY and META_MODEL)."
+        # Floor the budget: live diagnostics showed finish_reason
+        # "length" with null visible content at 256, i.e. the budget
+        # was consumed before any visible content was produced.
+        # No caller may starve a Meta call below 1024 again.
+        max_tokens = max(int(max_tokens or 0), 1024)
         url = self.base.rstrip("/") + "/chat/completions"
         try:
             import requests
@@ -336,5 +376,6 @@ class MetaService:
                           f"(response keys: {keys_text}). {guidance}")
         except Exception as exc:
             self.last_diagnostic = {"status": None, "response_keys": [],
-                                    "choice_structure": None}
+                                    "choice_structure": None,
+                                    "usage_keys": None}
             return None, f"Could not reach the Meta-compatible API: {exc}"[:300]

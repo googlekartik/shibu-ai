@@ -155,7 +155,10 @@ def test_r4_meta_diagnostic_records_choice_structure_without_values(monkeypatch)
     }
     dumped = json.dumps(diag)
     assert "SECRET VALUE TEXT" not in dumped
-    assert "tokens" not in dumped
+    # usage_keys records key NAMES only: the key "tokens" appears,
+    # but its VALUE (7) never does.
+    assert diag["usage_keys"] == {"keys": ["tokens"], "nested": {}}
+    assert '"tokens": 7' not in dumped and "tokens\": 7" not in dumped
 
 
 # ---------------------------------------------------------------- P1

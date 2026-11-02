@@ -296,7 +296,10 @@ def test_r3_llm_status_exposes_provider_error_without_values(monkeypatch):
     data = app_module.app.test_client().get("/api/llm/status").get_json()
     assert data["provider_error"]["status"] == 200
     assert data["provider_error"]["response_keys"] == ["output"]
-    assert set(data["provider_error"]) <= {"status", "response_keys", "provider", "choice_structure"}
+    assert set(data["provider_error"]) <= {"status", "response_keys", "provider", "choice_structure",
+                                          "usage_keys"}
+    # No "usage" object in this body: usage_keys is None, not invented.
+    assert data["provider_error"]["usage_keys"] is None
     # No "choices" list at all: there is no choices[0] structure
     # to report, so choice_structure is None rather than invented.
     assert data["provider_error"]["choice_structure"] is None
