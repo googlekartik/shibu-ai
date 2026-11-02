@@ -127,6 +127,23 @@ def _is_lookup_failure(sentence: str) -> bool:
     return any(p.search(sentence or "") for p in _LOOKUP_FAILURE_PATTERNS)
 
 
+# Framing sentences of a web answer ("Here's what I found on the
+# web about '...'"): they already appear once, verbatim, in the
+# intro paragraph. They are framing, not instructions, so they
+# must never be re-presented as a step — otherwise the same
+# sentence shows twice, once as text and once inside Steps.
+_FRAMING_PATTERNS = (
+    re.compile(r"^\s*here'?s what i found on the web\b", re.I),
+    re.compile(r"^\s*in short, according to the latest web results\b", re.I),
+)
+
+
+def _is_framing_sentence(sentence: str) -> bool:
+    """True for a web answer's framing sentence, which belongs in
+    the intro paragraph only, never in a Steps block."""
+    return any(p.search(sentence or "") for p in _FRAMING_PATTERNS)
+
+
 def _drop_source_titles(items: list, sources: list) -> list:
     """Drop any item that IS a source title: steps must never be
     built from result titles, in any formatter. Titles come from
@@ -196,12 +213,12 @@ def structure(response_text: str, analysis: dict, intent: dict, sources: list = 
         from services.web_answer import _is_polluted_text, _is_title_like
         items = [it for it in items
                  if not _is_title_like(it) and not _is_polluted_text(it)
-                 and not _is_lookup_failure(it)]
+                 and not _is_lookup_failure(it) and not _is_framing_sentence(it)]
         items = _drop_source_titles(items, sources)
         if not items:
             items = [s for s in _sentences_from(steps_text)[:8]
                      if not _is_title_like(s) and not _is_polluted_text(s)
-                     and not _is_lookup_failure(s)]
+                     and not _is_lookup_failure(s) and not _is_framing_sentence(s)]
             items = _drop_source_titles(items, sources)
         if items:
             blocks.append({"kind": "steps", "title": "Steps", "items": items[:10]})

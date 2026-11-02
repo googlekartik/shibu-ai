@@ -16,7 +16,9 @@ from services.math_service import MathService, looks_like_math
 from services.pdf_service import PDFService
 from services.web_search_service import WebSearchService
 from services.web_answer import (format_web_answer, clean_search_topic, filter_results,
-                              _is_howto_query, _content_nouns, _result_mentions_nouns)
+                              _is_howto_query, _content_nouns, _result_mentions_nouns,
+                              _howto_steps)
+from utils.text_processing import clean_text as _clean_snippet_text
 from services.code_service import (generate_code, debug_code, compare as compare_topics,
                                   detect_code_request, generate_code_for, explain_code)
 from services.code_runner import run_python_code
@@ -531,6 +533,19 @@ def _web_fallback_answer(text: str, context, processing_ms=0.0):
     results = filter_results(topic, raw_results)
     if not results:
         return None
+    if _is_howto_query(topic):
+        # A how-to answer is only usable when the surviving
+        # results contain at least one imperative instruction.
+        # Results that merely mention the topic (a definition, a
+        # wiki page about a fictional device) carry no steps, and
+        # serving them produces a Sources list plus a bogus Steps
+        # block built from the framing sentence. Return None so
+        # the caller falls through to the built-in steps or the
+        # honest single-sentence unavailable answer instead.
+        snippets = [_clean_snippet_text(r.get("snippet", ""))
+                    for r in results if r.get("snippet")]
+        if not _howto_steps(snippets, max_points=1):
+            return None
     payload = format_response(
         text=format_web_answer(topic, results),
         intent="WEB_SEARCH", rule_id="web_fallback", confidence=0.85,

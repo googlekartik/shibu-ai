@@ -27,6 +27,9 @@ _GENERIC_WORDS = frozenset({
     "from", "that", "this", "it", "its", "my", "your", "when", "where",
     "which", "who", "why", "does", "did", "should", "would", "could",
     "explain", "define", "meaning", "look", "up", "browse", "step", "steps",
+    # Modifier adverbs: never the topic of a how-to ("how to quickly
+    # calibrate ..." is about calibrating, not about "quickly").
+    "quickly", "easily", "properly", "correctly", "safely", "effectively",
 })
 
 # Title/snippet patterns that mark a result as media/budget content
@@ -86,11 +89,33 @@ _ACTION_VERBS = frozenset({
 })
 
 
+# How-to phrasings whose first substantive word is the ACTION, not
+# the topic: in "how to calibrate a flux capacitor" the verb is
+# "calibrate" and the topic is "flux capacitor". Treating the verb
+# as a content noun lets verb-only results ("Calibrate Weight
+# Loss", a dictionary entry for "calibrate") pass the relevance
+# gate for a question they cannot answer.
+_HOWTO_PREFIXES = ("how to ", "how do i ", "how can i ", "how do you ",
+                   "steps to ", "step by step ")
+
+
 def _content_nouns(query: str) -> list:
     """The query's core content noun(s): substantive terms minus
-    the action verb(s). "how to make tea" -> ["tea"]; a query
-    with no noun left (e.g. "how to make it") yields []."""
-    return [t for t in _substantive_terms(query) if t not in _ACTION_VERBS]
+    the action verb(s). "how to make tea" -> ["tea"]; "how to
+    calibrate a flux capacitor" -> ["flux", "capacitor"]. A query
+    with no noun left (e.g. "how to meditate") yields []."""
+    terms = _substantive_terms(query)
+    low = (query or "").lower().strip()
+    if len(terms) > 1 and any(low.startswith(prefix) for prefix in _HOWTO_PREFIXES):
+        # The first substantive term after the prefix is the
+        # action word itself ("calibrate", "make", "tie"); drop
+        # that one occurrence only, so a repeated topic word
+        # survives ("how to tie a tie" -> ["tie"]). A single-term
+        # query ("how to meditate") keeps its term: the word is
+        # both the action and the topic, and dropping it would
+        # disable the content-noun gate and query expansion.
+        terms = terms[1:]
+    return [t for t in terms if t not in _ACTION_VERBS]
 
 
 def _result_mentions_nouns(result: dict, nouns: list) -> bool:
