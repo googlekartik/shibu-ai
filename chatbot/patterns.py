@@ -178,7 +178,7 @@ RULES = [
      "patterns": [r"\bsearch\b", r"\blatest news\b", r"\bcurrent\b"],
      "keywords": ["search", "latest"],
      "synonyms": {},
-     "responses": ["For current information I use Chrome-based Google search and always show the title, URL and snippet for each source, so web results are never confused with my rule database. Try 'Search latest AI news'."],
+     "responses": ["For current information I use LangSearch web search and always show the title, URL and snippet for each source, so web results are never confused with my rule database. Try 'Search latest AI news'."],
      "priority": 25},
     {"id": "how_are_you", "intent": "HOW_ARE_YOU",
      "patterns": [r"\bhow are you\b", r"\bhow is it going\b"],

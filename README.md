@@ -33,7 +33,7 @@ in the header, so the main view stays uncluttered.
 - Confidence: exact = 0.98, regex ≈ 0.90, keywords up to 0.85, synonyms up to 0.65; labelled HIGH / MEDIUM / LOW and shown in the UI.
 - Session context: "What is Python?" then "What is it used for?" works.
 - Maths (SymPy, never `eval()`): `25 + 50`, `25% of 800`, `sqrt(144)`, `2^10`, `solve x + 5 = 12`, `derivative of x^3`, `integral of x^2`, mean/median.
-- Web search (Chrome-based Google search): title, URL, snippet, source — always labelled as web-derived.
+- Web search (Chrome-based search + LangSearch API): title, URL, snippet, source — always labelled as web-derived.
 - PDF (ReportLab): topic PDF, conversation PDF, any text; title, timestamp, page numbers, footer; files in `generated/` with a download button.
 - Conversational intelligence: follow-ups, multi-step instructions ("What is Python? then calculate 25% of 800"), clarifying questions for vague input instead of guessing, and saved preferences ("set tone to simple", "expert level", "explain simply"). Low-confidence answers are labelled as uncertain.
 - Reasoning: step-by-step maths ("Solve step by step 25 + 50"), code generation templates ("Write Python code for factorial"), code debugging with AST syntax checks ("Debug this code: ..."), and comparisons with trade-offs ("Compare Python and Java").
@@ -137,7 +137,7 @@ Architecture, in the existing structure instead of a duplicate one:
 - `services/conversation_manager.py` — `conversation_manager`: last 6 turns, trimmed to ~6,000 characters, Hindi/Hinglish detection, system prompt + chat-template use.
 - `services/response_generator.py` — `response_generator`: validates (empty = failure, repeated answer = failure), keeps uncertainty, labels every AI answer.
 - `chatbot/router.py` — `intent_router`: rules, maths, search, documents and files run first. The LLM only answers UNKNOWN / low-confidence questions, and explicit `ai: ...` messages.
-- `services/web_search_service.py` — `web_search` (already existed, unchanged in purpose): Chrome-based Google search with sources and links.
+- `services/web_search_service.py` — `web_search` (already existed, unchanged in purpose): Chrome-based search with the LangSearch API fallback, with sources and links.
 - `services/document_service.py` — `document_processor` (already existed): PDF/DOCX/XLSX extraction, summary, Q&A, notes, spreadsheet trends.
 - `services/file_generation_service.py` — `file_generator` (already existed): PPTX/DOCX/XLSX/PDF downloads.
 
@@ -163,7 +163,7 @@ Try it:
 - Hindi/Hinglish: `Namaste` works from the rules even with no LLM; with the LLM enabled, `ai: photosynthesis kya hai?` should answer in Hinglish.
 
 ## 13. Web Search
-`services/chrome_search_service.py` searches with headless Chromium (Playwright, else Selenium) when installed, else the Google Programmable Search JSON API when `GOOGLE_SEARCH_API_KEY` and `GOOGLE_SEARCH_CX` are both set; otherwise it returns `[]` and the UI says so honestly. See `docs/GEMINI_CHROME_UPGRADE.md` for the honest Render/Chromium note (opt-in install). Web-grounded LLM drafts (how-tos, news/current-info) also receive the top search snippets as a labelled, instruction-stripped SEARCH CONTEXT block in the prompt, so the model drafts from snippets instead of inventing facts; RAG prompts are unchanged.
+`services/chrome_search_service.py` searches with headless Chromium (Playwright, else Selenium) when installed, else the LangSearch Web Search API when `LANGSEARCH_API_KEY` is set, else DuckDuckGo; otherwise it returns `[]` and the UI says so honestly. See `docs/GEMINI_CHROME_UPGRADE.md` for the honest Render/Chromium note (opt-in install). Web-grounded LLM drafts (how-tos, news/current-info) also receive the top search snippets as a labelled, instruction-stripped SEARCH CONTEXT block in the prompt, so the model drafts from snippets instead of inventing facts; RAG prompts are unchanged.
 
 ## 14. PDF Generation
 `services/pdf_service.py` (ReportLab Platypus) adds title, timestamp, headings, page numbers and footer, and writes only into `generated/` with sanitised filenames.

@@ -15,11 +15,12 @@ Order for every query:
   (b) headless Chromium via Playwright if installed, else Selenium
       if installed, loading a Google search results page and parsing
       title / URL / snippet only;
-  (c) Google Programmable Search JSON API, only when both
-      GOOGLE_SEARCH_API_KEY and GOOGLE_SEARCH_CX are set;
+  (c) LangSearch Web Search API, only when LANGSEARCH_API_KEY
+      is set (server-side API, so it works on hosts like Render
+      where no browser is installed and scraping returns nothing);
   (d) DuckDuckGo (ddgs library, else its HTML endpoint) — the
       no-keys fallback, so search still returns results on hosts
-      with no browser automation and no Google API keys;
+      with no browser automation and no LangSearch key;
   (e) [] with a clear reason (see `last_reason`).
 
 Safety rules, enforced here and nowhere else needed:
@@ -33,14 +34,16 @@ Safety rules, enforced here and nowhere else needed:
   is blocked: return [] (never bypass a CAPTCHA, authentication,
   paywall, or website security control).
 - Playwright and Selenium are OPTIONAL imports. When neither is
-  installed this module still imports and works (Google API / []
-  path), so the Render free build — which does not install them —
-  is unaffected. Opt-in install: requirements-chrome.txt plus
+  installed this module still imports and works (LangSearch /
+  DuckDuckGo path), so the Render free build — which does not
+  install them — is unaffected. Opt-in install: requirements-chrome.txt plus
   `playwright install chromium` in the build step (see
   docs/GEMINI_CHROME_UPGRADE.md). Without that install, headless
-  Chromium does NOT run on Render; the Google API / empty path
+  Chromium does NOT run on Render; the LangSearch / DuckDuckGo path
   applies instead. Never claim otherwise.
 - Only title, URL and snippet are kept. No page body is fetched.
+- The LangSearch key is sent only to LangSearch's API endpoint as
+  a Bearer token, as the API requires; it is never logged or stored.
 - The DuckDuckGo fallback is a plain HTTP fetch (ddgs library /
   HTML endpoint), no browser, no stored data of any kind.
 """
@@ -133,11 +136,11 @@ def parse_google_results_page(page_html: str, max_results: int):
 
 
 class ChromeSearchService:
-    """Headless-Chromium Google search, with the Google JSON API
+    """Headless-Chromium web search, with the LangSearch API
     and then DuckDuckGo as the non-browser fallbacks. Instances are
     stateless apart from `last_reason`, which explains the most
     recent [] result (disabled / blocked / no-automation /
-    api-unconfigured / duckduckgo_error / no_results).
+    langsearch_unconfigured / duckduckgo_error / no_results).
     """
 
     def __init__(self, max_results=None, timeout=None, executable_path=None):
@@ -166,7 +169,7 @@ class ChromeSearchService:
         if results:
             self.last_reason = ""
             return results
-        results = self._google_api_search(query)
+        results = self._langsearch_search(query)
         if results:
             self.last_reason = ""
             return results
@@ -252,54 +255,78 @@ class ChromeSearchService:
             self.last_reason = "browser_no_results"
         return results
 
-    # -- (c) Google Programmable Search JSON API -----------------------
-    def _google_configured(self) -> bool:
-        return bool((os.environ.get("GOOGLE_SEARCH_API_KEY", "") or "").strip()
-                    and (os.environ.get("GOOGLE_SEARCH_CX", "") or "").strip())
+    # -- (c) LangSearch Web Search API (no browser, no scraping) -----
+    def _langsearch_configured(self) -> bool:
+        return bool((os.environ.get("LANGSEARCH_API_KEY", "") or "").strip())
 
-    def _google_api_search(self, query: str):
-        """Google JSON API results, or [] when unconfigured or on
-        any failure. The key is sent only to Google's API endpoint,
-        as the API requires; it is never logged or stored."""
-        if not self._google_configured():
-            self.last_reason = "google_api_unconfigured"
+    def _langsearch_search(self, query: str):
+        """LangSearch results, or [] when unconfigured or on any
+        failure. The key is sent only to LangSearch's API endpoint
+        as a Bearer token, as the API requires; it is never logged
+        or stored. Response shape: data.webPages.value items with
+        name / url / snippet (or text when full text is enabled).
+        Only title, URL and snippet are kept."""
+        if not self._langsearch_configured():
+            self.last_reason = "langsearch_unconfigured"
             return []
         try:
-            base = ((os.environ.get("GOOGLE_SEARCH_BASE", "") or "").strip()
-                    or "https://www.googleapis.com/customsearch/v1")
-            params = {
-                "q": query,
-                "key": (os.environ.get("GOOGLE_SEARCH_API_KEY", "") or "").strip(),
-                "cx": (os.environ.get("GOOGLE_SEARCH_CX", "") or "").strip(),
-                "num": str(max(1, min(int(self.max_results), 10))),
-                "safe": "active",
+            base = ((os.environ.get("LANGSEARCH_API_BASE", "") or "").strip()
+                    or "https://api.langsearch.com/v1")
+            payload = {
+                "query": query,
+                "count": max(1, min(int(self.max_results), 50)),
+                "freshness": "noLimit",
             }
-            url = base.rstrip("/") + "?" + urllib.parse.urlencode(params)
-            req = urllib.request.Request(url, headers={"Accept": "application/json"})
+            req = urllib.request.Request(
+                base.rstrip("/") + "/web-search",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Authorization": "Bearer "
+                        + (os.environ.get("LANGSEARCH_API_KEY", "") or "").strip(),
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                method="POST",
+            )
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 if resp.status != 200:
-                    self.last_reason = "google_api_error"
+                    self.last_reason = "langsearch_error"
                     return []
                 data = json.loads(resp.read().decode("utf-8", errors="ignore"))
-            items = data.get("items") if isinstance(data, dict) else None
+            items = None
+            if isinstance(data, dict):
+                web_pages = data.get("data")
+                if isinstance(web_pages, dict):
+                    value = web_pages.get("webPages")
+                    if isinstance(value, dict):
+                        items = value.get("value")
             if not isinstance(items, list) or not items:
-                self.last_reason = "google_api_no_results"
+                self.last_reason = "langsearch_no_results"
                 return []
             results = []
             for item in items:
                 if not isinstance(item, dict):
                     continue
+                url = str(item.get("url", "") or "").strip()
+                if not url.startswith("http"):
+                    continue
+                snippet = str(item.get("snippet", "") or "").strip()
+                if not snippet:
+                    snippet = str(item.get("text", "") or "").strip()
                 results.append({
-                    "title": str(item.get("title", "") or "").strip(),
-                    "url": str(item.get("link", "") or "").strip(),
-                    "snippet": str(item.get("snippet", "") or "").strip(),
-                    "source": "Google",
+                    "title": str(item.get("name", "") or "").strip(),
+                    "url": url,
+                    "snippet": snippet,
+                    "source": "LangSearch",
                 })
                 if len(results) >= self.max_results:
                     break
+            if not results:
+                self.last_reason = "langsearch_no_results"
+                return []
             return results
         except Exception:
-            self.last_reason = "google_api_error"
+            self.last_reason = "langsearch_error"
             return []
 
     # -- (d) DuckDuckGo fallback (no keys, no browser) ------------------
@@ -307,8 +334,8 @@ class ChromeSearchService:
         """No-keys web fallback: the ddgs library first, else the
         DuckDuckGo HTML endpoint parsed with regex only. Never
         raises; [] on any failure. This is what keeps search
-        working on hosts with no browser automation and no Google
-        API keys (e.g. Render free), where the layers above
+        working on hosts with no browser automation and no
+        LangSearch API key (e.g. Render free), where the layers above
         return nothing."""
         try:
             from ddgs import DDGS  # type: ignore

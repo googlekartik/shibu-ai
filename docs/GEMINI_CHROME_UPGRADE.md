@@ -1,8 +1,9 @@
 # Gemini / Chrome Upgrade (2026-11-03, local only — not yet merged/deployed)
 
 Shibu AI is now **Gemini-first, Gemini-only**: Google Gemini is the
-sole primary AI model. Chrome-based Google search replaces the old
-search path. Paraphrases of the same question are recognised as the
+sole primary AI model. LangSearch web search replaces the old
+search path (Chrome-based search remains the first step when
+Chromium automation is installed). Paraphrases of the same question are recognised as the
 same intent (semantic similarity, synonyms, spelling correction,
 entity extraction, conversation context, approved aliases, and
 confidence scoring).
@@ -90,9 +91,10 @@ AI provider is ever called automatically.
    login, clicks, or form filling; a CAPTCHA/block/consent page
    returns `[]` — CAPTCHAs, authentication, paywalls, and website
    security controls are never bypassed.
-3. Google Programmable Search JSON API, only when both
-   `GOOGLE_SEARCH_API_KEY` and `GOOGLE_SEARCH_CX` are set.
-4. `[]` with a reason in `last_reason`.
+3. LangSearch Web Search API, only when `LANGSEARCH_API_KEY`
+   is set.
+4. DuckDuckGo (no keys, no browser) as the last fallback.
+5. `[]` with a reason in `last_reason`.
 
 **Playwright/Selenium are optional imports.** The service imports
 and works (API/empty path) when neither is installed, and neither
@@ -230,11 +232,12 @@ well as SQLite rows — verified in code, not live.
 | `MAX_SEARCH_RESULTS` | `5` (1–10) | Search result cap |
 | `SEMANTIC_CONFIDENCE_THRESHOLD` | `0.70` | Paraphrase clarification threshold |
 | `ROUTER_PREFERENCE` | `auto` | `auto` or `gemini` only |
-| `GOOGLE_SEARCH_API_KEY` / `GOOGLE_SEARCH_CX` | (none) | Google Programmable Search JSON API (non-browser fallback) |
+| `LANGSEARCH_API_KEY` / `LANGSEARCH_API_BASE` | (none) | LangSearch Web Search API (non-browser fallback; free plan, daily token allowance) |
 | `PINECONE_API_KEY` / `PINECONE_INDEX_NAME` / `PINECONE_INDEX_TYPE` | (none) | Pinecone RAG (integrated index: server-side embedding, no local embedder) |
 
 Removed/ignored (do not set): `HF_TOKEN`, `HF_MODEL`, `HF_PROVIDER`,
 `HF_USE_LOCAL`, `HF_FORCE_LOCAL`, `OPENAI_API_KEY`, `WEB_SEARCH_PROVIDER`,
+`GOOGLE_SEARCH_API_KEY`, `GOOGLE_SEARCH_CX`, `GOOGLE_SEARCH_BASE`,
 `ddgs`. `render.yaml` lists only names to set in the Render
 dashboard, never values; build/start commands are unchanged.
 

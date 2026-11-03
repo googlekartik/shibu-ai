@@ -238,13 +238,13 @@ def test_gemini_failure_in_chat_uses_labelled_fallback(monkeypatch):
 def test_chrome_disabled_and_absent_libraries(monkeypatch):
     from services.chrome_search_service import ChromeSearchService
     monkeypatch.setenv("BROWSER_SEARCH_ENABLED", "false")
-    monkeypatch.delenv("GOOGLE_SEARCH_API_KEY", raising=False)
-    monkeypatch.delenv("GOOGLE_SEARCH_CX", raising=False)
+    monkeypatch.delenv("LANGSEARCH_API_KEY", raising=False)
+    monkeypatch.delenv("LANGSEARCH_API_BASE", raising=False)
     svc = ChromeSearchService()
     assert svc.search("tea") == []
     assert svc.last_reason == "browser_search_disabled"
     monkeypatch.setenv("BROWSER_SEARCH_ENABLED", "true")
-    # No automation libs, no Google keys: the DuckDuckGo fallback
+    # No automation libs, no LangSearch key: the DuckDuckGo fallback
     # is mocked to [] here so the test never touches the network.
     monkeypatch.setattr(ChromeSearchService, "_duckduckgo_search",
                         lambda self, q: [])
