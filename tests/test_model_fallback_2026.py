@@ -1,10 +1,10 @@
-"""Provider routing + fallback in ModelManager (2026-11-01, router
-2026-11-03, Gemini replaces OpenAI 2026-11-03): the router decides
-per request (short prompts go to Hugging Face first); when the chosen
-provider fails, the other provider gets exactly one fallback call. If
-both fail, one clean neutral error is returned — no provider
-internals, no quota or billing wording. The detail stays in
-structure-only diagnostics.
+"""Gemini-only fallback (2026-11-03): Gemini is the only AI
+provider. When Gemini fails, ModelManager makes exactly one call
+and returns its error; there is no second provider to fall back
+to. Callers use the deterministic fallback (rules / maths /
+retrieved documents / search snippets, labelled) instead. No
+provider internals leak into user-facing text beyond the
+diagnostic detail the manager itself returns.
 """
 import os
 
@@ -27,49 +27,63 @@ class _FailingGemini:
                       "Check your Google AI Studio quota.")
 
 
+class _CountingGemini:
+    calls = 0
+
+    def __init__(self, api_key=None, model=None):
+        pass
+
+    def generate(self, messages, max_tokens=256, temperature=0.7):
+        type(self).calls += 1
+        return "Gemini drafted answer.", None
+
+
 def _manager(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "sk-test")
-    monkeypatch.setenv("HF_TOKEN", "hf-test")
-    monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
+    monkeypatch.delenv("ROUTER_PREFERENCE", raising=False)
     return ModelManager()
 
 
-def test_gemini_quota_falls_back_to_hf(monkeypatch):
+def test_gemini_failure_returns_error_after_exactly_one_call(monkeypatch):
     import services.gemini_service as gemini_service
+    _FailingGemini.calls = 0
     monkeypatch.setattr(gemini_service, "GeminiService", _FailingGemini)
     manager = _manager(monkeypatch)
     assert manager.mode == "gemini"
-    monkeypatch.setattr(ModelManager, "_generate_api",
-                        lambda self, *a, **k: ("HF drafted answer.", None))
     text, err = manager.generate([{"role": "user", "content": "hi"}])
-    assert text == "HF drafted answer." and err is None
+    assert text is None and err is not None
+    assert _FailingGemini.calls == 1
 
 
-def test_both_providers_failing_returns_clean_error(monkeypatch):
+def test_gemini_success_makes_exactly_one_call(monkeypatch):
+    import services.gemini_service as gemini_service
+    _CountingGemini.calls = 0
+    monkeypatch.setattr(gemini_service, "GeminiService", _CountingGemini)
+    manager = _manager(monkeypatch)
+    text, err = manager.generate([{"role": "user", "content": "hi"}])
+    assert text == "Gemini drafted answer." and err is None
+    assert _CountingGemini.calls == 1
+
+
+def test_off_mode_makes_no_call(monkeypatch):
+    import services.gemini_service as gemini_service
+    _CountingGemini.calls = 0
+    monkeypatch.setattr(gemini_service, "GeminiService", _CountingGemini)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    manager = ModelManager()
+    assert manager.mode == "off"
+    text, err = manager.generate([{"role": "user", "content": "hi"}])
+    assert text is None and err
+    assert _CountingGemini.calls == 0
+    assert "GEMINI_API_KEY" in manager.status()["how_to_enable"]
+
+
+def test_failure_records_structure_only_diagnostic(monkeypatch):
     import services.gemini_service as gemini_service
     monkeypatch.setattr(gemini_service, "GeminiService", _FailingGemini)
     manager = _manager(monkeypatch)
-    monkeypatch.setattr(ModelManager, "_generate_api",
-                        lambda self, *a, **k: (None, "HF router 503"))
-    text, err = manager.generate([{"role": "user", "content": "hi"}])
-    assert text is None and err == "The language model could not draft this."
-    for forbidden in ("429", "quota", "aistudio.google.com", "HF router"):
-        assert forbidden not in err
-
-
-def test_no_hf_token_means_no_wasted_hf_attempt(monkeypatch):
-    import services.gemini_service as gemini_service
-    monkeypatch.setattr(gemini_service, "GeminiService", _FailingGemini)
-    monkeypatch.setenv("GEMINI_API_KEY", "sk-test")
-    monkeypatch.delenv("HF_TOKEN", raising=False)
-    manager = ModelManager()
-    assert manager.mode == "gemini" and not manager.token
-    calls = {"n": 0}
-
-    def _never(self, *a, **k):
-        calls["n"] += 1
-        return None, "should not be called"
-
-    monkeypatch.setattr(ModelManager, "_generate_api", _never)
-    text, err = manager.generate([{"role": "user", "content": "hi"}])
-    assert text is None and calls["n"] == 0
+    manager.generate([{"role": "user", "content": "hi"}])
+    status = manager.status()
+    assert status["provider_error"] is not None
+    assert status["provider_error"]["provider"] == "gemini"
+    assert "sk-test" not in str(status)

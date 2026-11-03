@@ -11,6 +11,8 @@ import statistics
 
 import sympy as sp
 
+from services.semantic_intent import extract_percentage_entities
+
 x = sp.Symbol("x")
 
 ALLOWED_CHARS = re.compile(r"^[0-9x\+\-\*/\^\%\(\)\.\s,=a-z]+$")
@@ -100,6 +102,14 @@ def looks_like_math(text: str) -> bool:
         return True
     if re.search(r"\d+\s*%\s*of\s*\d+", low):
         return True
+    # Percentage paraphrases: "25 percent from 800", "25 per cent
+    # of 800", "one-fourth / quarter / half / third of 800".
+    if re.search(r"\d+\s*(?:percent|per\s*cent)\s*(?:of|from|out\s+of)?\s*\d+", low):
+        return True
+    if re.search(r"\b(one[-\s]fourth|one[-\s]quarter|a\s+quarter|quarter|half|one[-\s]half|third|one[-\s]third|three[-\s]quarters?|three[-\s]fourths?)\b\s*(?:of|from|out\s+of)?\s*\d+", low):
+        return True
+    if re.search(r"\b(find|calculate|compute|work out)\b.*\b(percent|%|quarter|half|third)\b", low):
+        return True
     if re.search(r"\d+\s*[\+\-\*/\^]\s*\d+", low) and not re.search(r"[a-z]{3,}", low.replace("sqrt", "")):
         return True
     if re.match(r"^[\d\s\+\-\*/\^\%\(\)\.]+$", low) and any(c.isdigit() for c in low):
@@ -130,14 +140,22 @@ class MathService:
 
             expr_text = _clean(raw)
 
-            # Percentage: "25% of 800"
-            m = re.search(r"(\d+(?:\.\d+)?)\s*%\s*of\s*(\d+(?:\.\d+)?)", expr_text)
-            if m:
-                pct, base = float(m.group(1)), float(m.group(2))
+            # Percentage, in every paraphrase: "25% of 800",
+            # "25 percent from 800", "25 per cent of 800",
+            # "one-fourth of 800", "a quarter of 800", "half of 800".
+            # All paraphrases produce the SAME calculation text
+            # shape, so the same intent is visibly the same answer.
+            # The annuity branch above runs first, so a savings
+            # sentence with a percent rate is never mistaken for
+            # a bare percentage here.
+            pct_entities = extract_percentage_entities(raw)
+            if pct_entities is not None:
+                pct, base = pct_entities["percentage"], pct_entities["number"]
                 ans = pct / 100.0 * base
                 ans = int(ans) if ans.is_integer() else ans
+                pct_label = _fmt_num(pct)
                 return {"success": True, "expression": raw.strip(),
-                        "calculation": f"{pct}% of {base} = {pct}/100 x {base}",
+                        "calculation": f"{pct_label}% of {_fmt_num(base)} = {pct_label}/100 x {_fmt_num(base)}",
                         "answer": str(ans)}
 
             # Unit conversion: "convert 5 km to miles", "convert 100 celsius to fahrenheit"

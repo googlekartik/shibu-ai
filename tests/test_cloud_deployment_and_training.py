@@ -39,5 +39,6 @@ def test_render_uses_hosted_only_production_process():
     render = (ROOT / "render.yaml").read_text(encoding="utf-8")
     assert "gunicorn" in render
     assert "CLOUD_ONLY" in render
-    assert "HF_USE_LOCAL" in render
+    assert "GEMINI_API_KEY" in render
+    assert "HF_USE_LOCAL" not in render
     assert "/api/health" in render

@@ -26,8 +26,8 @@ try:
 except OSError:
     pass
 for _key in ("PINECONE_API_KEY", "PINECONE_INDEX_NAME", "DEV_PANEL",
-             "GEMINI_API_KEY", "GEMINI_MODEL", "HF_TOKEN",
-             "HF_USE_LOCAL", "HF_FORCE_LOCAL"):
+             "GEMINI_API_KEY", "GEMINI_MODEL", "GEMINI_MODEL",
+             "GEMINI_MODEL", "GEMINI_MODEL"):
     os.environ.pop(_key, None)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -88,8 +88,6 @@ def test_r7_fresh_gemini_failure_status_has_new_diagnostic_keys(monkeypatch, tmp
     import services.model_manager as mm
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.setenv("GEMINI_MODEL", "gemini-test")
-    monkeypatch.delenv("HF_TOKEN", raising=False)
-    monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
     monkeypatch.setenv("SHIBU_DIAGNOSTIC_DIR", str(tmp_path))
     monkeypatch.setattr(requests, "post",
                         lambda *a, **k: _Resp(_gemini_body("SAFETY", True)))
@@ -118,8 +116,6 @@ def test_r7_stale_sidecar_never_masks_fresh_diagnostic(monkeypatch, tmp_path):
     import services.model_manager as mm
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.setenv("GEMINI_MODEL", "gemini-test")
-    monkeypatch.delenv("HF_TOKEN", raising=False)
-    monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
     monkeypatch.setenv("SHIBU_DIAGNOSTIC_DIR", str(tmp_path))
     monkeypatch.setattr(requests, "post",
                         lambda *a, **k: _Resp(_gemini_body("SAFETY", True)))
@@ -150,8 +146,6 @@ def test_r7_restart_reads_new_shape_from_sidecar_only(monkeypatch, tmp_path):
     import services.model_manager as mm
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.setenv("GEMINI_MODEL", "gemini-test")
-    monkeypatch.delenv("HF_TOKEN", raising=False)
-    monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
     monkeypatch.setenv("SHIBU_DIAGNOSTIC_DIR", str(tmp_path))
     monkeypatch.setattr(requests, "post",
                         lambda *a, **k: _Resp(_gemini_body("STOP", False)))

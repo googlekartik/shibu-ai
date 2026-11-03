@@ -11,8 +11,10 @@ python-docx>=1.1
 openpyxl>=3.1
 # File generation
 python-pptx>=0.6.21
-# Optional: faster / more reliable DuckDuckGo search. The app works without it.
-ddgs>=9.0; python_version >= "3.9"
+# Web search uses headless Chromium only when Playwright is installed
+# (opt-in: see requirements-chrome.txt). The app works without it:
+# the Google Programmable Search JSON API is used when configured,
+# otherwise search returns no results and chat falls back honestly.
 pytest>=8.0
 # Pinecone RAG (optional, production only): the app runs without it
 # on the SQLite fallback. Install only when a Pinecone index exists.

@@ -24,6 +24,8 @@ import time
 import uuid
 from contextlib import contextmanager
 
+from services.memory_service import redact_pii
+
 
 class PostgresStore:
     def __init__(self, dsn: str = None, connect_fn=None):
@@ -77,7 +79,7 @@ class PostgresStore:
                 cur.execute(
                     "INSERT INTO query_events (event_id, user_id, question, intent, rule_id, confidence, is_fallback, processing_ms, created_at) "
                     "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (event_id) DO NOTHING",
-                    (uuid.uuid4().hex, user_id, (question or "")[:500], intent or "",
+                    (uuid.uuid4().hex, user_id, redact_pii((question or "")[:500]), intent or "",
                      rule_id or "", float(confidence or 0), 1 if is_fallback else 0,
                      float(processing_ms or 0), self._now()))
 

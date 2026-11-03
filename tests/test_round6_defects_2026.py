@@ -17,8 +17,8 @@ try:
 except OSError:
     pass
 for _key in ("PINECONE_API_KEY", "PINECONE_INDEX_NAME", "DEV_PANEL",
-             "GEMINI_API_KEY", "GEMINI_MODEL", "HF_TOKEN",
-             "HF_USE_LOCAL", "HF_FORCE_LOCAL"):
+             "GEMINI_API_KEY", "GEMINI_MODEL", "GEMINI_MODEL",
+             "GEMINI_MODEL", "GEMINI_MODEL"):
     os.environ.pop(_key, None)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

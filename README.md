@@ -2,7 +2,7 @@
 
 A complete, runnable university-level project: a **rule-based intelligent agent**
 named **Shibu AI** (cute anime avatar in the top-left corner, `static/shibu.png`)
-in Python + Flask, with SymPy maths, DuckDuckGo web search, ReportLab PDF
+in Python + Flask, with SymPy maths, Chrome-based Google web search, ReportLab PDF
 export, session memory, and explainability details. The UI is clean and
 Muse-style: a black background, a centred chat column, and just one text
 bar at the bottom. Explainability (intent, rule, confidence, tool, time)
@@ -10,12 +10,12 @@ and the agent-environment summary live behind a small "Details" toggle
 in the header, so the main view stays uncluttered.
 
 > This is deliberately **not** just an LLM chatbot. The rule engine decides
-> first. Hugging Face is optional and never replaces the rules.
+> first. Gemini is the only AI model and never replaces the rules.
 
 > **Cloud RAG upgrade (2026-10-31):** Signed-in document uploads now support
 > Pinecone-backed RAG with hosted embeddings, source citations, safe document
 > replacement/re-indexing, metadata filters, client-side hybrid scoring and
-> hosted Gemini/Hugging Face routing. The Render deployment is cloud-only—no
+> hosted Gemini routing. The Render deployment is cloud-only—no
 > local GPU, CUDA, or local model download is required. See
 > [`docs/RAG_AND_OPERATIONS.md`](docs/RAG_AND_OPERATIONS.md) and
 > [`docs/RENDER_DEPLOYMENT.md`](docs/RENDER_DEPLOYMENT.md); cloud LoRA/QLoRA is
@@ -33,7 +33,7 @@ in the header, so the main view stays uncluttered.
 - Confidence: exact = 0.98, regex ≈ 0.90, keywords up to 0.85, synonyms up to 0.65; labelled HIGH / MEDIUM / LOW and shown in the UI.
 - Session context: "What is Python?" then "What is it used for?" works.
 - Maths (SymPy, never `eval()`): `25 + 50`, `25% of 800`, `sqrt(144)`, `2^10`, `solve x + 5 = 12`, `derivative of x^3`, `integral of x^2`, mean/median.
-- Web search (DuckDuckGo, free): title, URL, snippet, source — always labelled as web-derived.
+- Web search (Chrome-based Google search): title, URL, snippet, source — always labelled as web-derived.
 - PDF (ReportLab): topic PDF, conversation PDF, any text; title, timestamp, page numbers, footer; files in `generated/` with a download button.
 - Conversational intelligence: follow-ups, multi-step instructions ("What is Python? then calculate 25% of 800"), clarifying questions for vague input instead of guessing, and saved preferences ("set tone to simple", "expert level", "explain simply"). Low-confidence answers are labelled as uncertain.
 - Reasoning: step-by-step maths ("Solve step by step 25 + 50"), code generation templates ("Write Python code for factorial"), code debugging with AST syntax checks ("Debug this code: ..."), and comparisons with trade-offs ("Compare Python and Java").
@@ -48,7 +48,7 @@ User
  ↓  Perception: receive the message
 State: current input + conversation history
  ↓  Decision: rule engine (regex + keywords + synonyms + priority + confidence)
-Action: rule answer  |  SymPy maths  |  DuckDuckGo search  |  ReportLab PDF
+Action: rule answer  |  SymPy maths  |  Chrome search  |  ReportLab PDF
  ↓  Response (with explainability)
 Browser / user interaction (Environment)
 ```
@@ -62,7 +62,7 @@ Browser / user interaction (Environment)
 This is also shown behind the "Details" toggle in the UI header.
 
 ## 5. Technology Stack
-Python 3.11+, Flask, Flask-CORS, python-dotenv, SymPy, ReportLab, requests, (optional) ddgs + Hugging Face. Frontend: HTML5, CSS3, JavaScript (custom black theme, no Bootstrap dependency needed).
+Python 3.11+, Flask, Flask-CORS, python-dotenv, SymPy, ReportLab, requests, (optional) Playwright for headless Chromium search. Frontend: HTML5, CSS3, JavaScript (custom black theme, no Bootstrap dependency needed).
 
 ## 6. Folder Structure
 ```
@@ -94,7 +94,7 @@ pip install -r requirements.txt
 ```bash
 cp .env.example .env
 # Optional only:
-# HF_TOKEN=hf_...        (leave empty = Hugging Face disabled, app still works)
+# GEMINI_API_KEY=<redacted>
 # HF_MODEL=google/flan-t5-small
 # SECRET_KEY=any-random-string
 # PORT=5000
@@ -131,19 +131,19 @@ Errors use proper codes: 400 for empty/invalid input, 500 for server errors, wit
 ## 11. Mathematics Module
 `services/math_service.py` uses SymPy only. Percentage, derivative, integral, solve, factor and statistics are parsed with regex first, then `sympy.sympify` with a restricted local namespace. `eval()` is never used on user input.
 
-## 12. Hugging Face Language Model (optional, rule-first)
+## 12. Gemini Language Model (the only AI model, optional, rule-first)
 Architecture, in the existing structure instead of a duplicate one:
 - `services/model_manager.py` — `model_manager`: selection, cache check, lazy loading, API + local generation, plain-language errors. Nothing is downloaded at startup.
 - `services/conversation_manager.py` — `conversation_manager`: last 6 turns, trimmed to ~6,000 characters, Hindi/Hinglish detection, system prompt + chat-template use.
 - `services/response_generator.py` — `response_generator`: validates (empty = failure, repeated answer = failure), keeps uncertainty, labels every AI answer.
 - `chatbot/router.py` — `intent_router`: rules, maths, search, documents and files run first. The LLM only answers UNKNOWN / low-confidence questions, and explicit `ai: ...` messages.
-- `services/web_search_service.py` — `web_search` (already existed, unchanged in purpose): DuckDuckGo with sources and links.
+- `services/web_search_service.py` — `web_search` (already existed, unchanged in purpose): Chrome-based Google search with sources and links.
 - `services/document_service.py` — `document_processor` (already existed): PDF/DOCX/XLSX extraction, summary, Q&A, notes, spreadsheet trends.
 - `services/file_generation_service.py` — `file_generator` (already existed): PPTX/DOCX/XLSX/PDF downloads.
 
 How it is enabled (pick one; the old `services/huggingface_service.py` API path is kept for compatibility):
-- **Option A — API (recommended, easiest):** copy `.env.example` to `.env`, set `HF_TOKEN` to a free token from huggingface.co/settings/tokens. The token must have the **"Make calls to Inference Providers"** permission — a plain read-only token without it is rejected with HTTP 401. No download, no extra RAM. Default API model: Qwen/Qwen2.5-3B-Instruct (set `HF_MODEL` to change it). API calls go to the current Inference Providers router, `https://router.huggingface.co/v1/chat/completions` — the old `api-inference.huggingface.co` endpoint is decommissioned and no longer connects, so do not use old tutorials that point at it. If an `ai:` message fails, Shibu now shows the real Hugging Face error (400 = model not supported by any provider you have enabled, 401 = token/permission, 404 = model not on the router, 429 = rate limit/credits, 503 = model loading) instead of saying "not enabled". For a 400, Shibu automatically retries the same model as `model:auto` and then, for Qwen models, as `model:featherless-ai` (the only live provider for Qwen2.5-3B-Instruct, verified against the Hub API), and labels the answer with the model+provider that actually answered. You can force a provider with `HF_PROVIDER=featherless-ai` in `.env`, or enable it at huggingface.co/settings/inference-providers.
-- **Option B — local model:** `pip install -r requirements-llm.txt`, then set `HF_USE_LOCAL=1` in `.env`. The model is auto-selected from RAM (see below) and downloaded once, on first LLM use, into the Hugging Face cache — later startups reuse it and download nothing. Set `HF_MODEL` to override the auto-pick, and `HF_QUANTIZE=4bit` (with bitsandbytes) to try a larger model quantized.
+- **Gemini (the only AI model):** copy `.env.example` to `.env`, set `GEMINI_API_KEY` to a Google AI Studio key (never share it, never commit `.env`, never paste it in chat). Default model: `gemini-2.5-flash` (set `GEMINI_MODEL` to change it). If an `ai:` message fails, Shibu shows the real Gemini error instead of saying "not enabled". See `docs/GEMINI_CHROME_UPGRADE.md` for the full Gemini/Chrome upgrade notes. Older Hugging Face / local-model instructions were removed with that upgrade.
+
 
 Model selection (verified 2026-10-24: all public, not gated, no login needed to download):
 | RAM | Auto-pick | Why |
@@ -163,7 +163,7 @@ Try it:
 - Hindi/Hinglish: `Namaste` works from the rules even with no LLM; with the LLM enabled, `ai: photosynthesis kya hai?` should answer in Hinglish.
 
 ## 13. Web Search
-`services/web_search_service.py` tries the `ddgs` library, then falls back to the DuckDuckGo HTML endpoint. On failure it returns `[]` and the UI says so honestly.
+`services/chrome_search_service.py` searches with headless Chromium (Playwright, else Selenium) when installed, else the Google Programmable Search JSON API when `GOOGLE_SEARCH_API_KEY` and `GOOGLE_SEARCH_CX` are both set; otherwise it returns `[]` and the UI says so honestly. See `docs/GEMINI_CHROME_UPGRADE.md` for the honest Render/Chromium note (opt-in install). Web-grounded LLM drafts (how-tos, news/current-info) also receive the top search snippets as a labelled, instruction-stripped SEARCH CONTEXT block in the prompt, so the model drafts from snippets instead of inventing facts; RAG prompts are unchanged.
 
 ## 14. PDF Generation
 `services/pdf_service.py` (ReportLab Platypus) adds title, timestamp, headings, page numbers and footer, and writes only into `generated/` with sanitised filenames.
@@ -177,10 +177,10 @@ Tests cover rules, synonyms, confidence range, context, maths (2+3=5, 25% of 800
 ## 16. Troubleshooting
 - **Port 5000 in use:** set `PORT=5001` in `.env` and run again, or stop the other app.
 - **ModuleNotFoundError:** make sure the virtual environment is activated and `pip install -r requirements.txt` finished.
-- **Search returns nothing:** check internet; DuckDuckGo may rate-limit briefly — try again.
+- **Search returns nothing:** check internet and whether Chrome search / the Google API is configured (see `docs/GEMINI_CHROME_UPGRADE.md`); try again.
 - **PDF won't download:** check the `generated/` folder exists and the file name in the URL matches.
-- **Hugging Face false in health:** expected if you didn't set `HF_TOKEN` — the app is designed to work without it.
-- **LLM out of memory:** use a smaller model (`HF_MODEL=Qwen/Qwen2.5-0.5B-Instruct`), set `HF_QUANTIZE=4bit` (needs bitsandbytes), or switch to the API mode with `HF_TOKEN`.
+- **Gemini false in health:** expected if you didn't set `GEMINI_API_KEY` — the app is designed to work without it.
+- **Gemini error in /api/llm/status:** check `GEMINI_API_KEY` and `GEMINI_MODEL` (use an id from your Google AI Studio model list); see `docs/GEMINI_CHROME_UPGRADE.md`.
 - **LLM test returns 503:** no model is enabled — that is the documented fallback, not a crash. Follow the `/api/llm/status` "how_to_enable" instructions.
 
 ## 17. Future Enhancements
@@ -191,13 +191,13 @@ Database persistence, user login, voice input/output, RAG over documents, larger
 
 ## 18. GitHub, Cloud, and Gemini API (drafting)
 
-**Gemini API:** Set `GEMINI_API_KEY` in `.env` (locally) or in your cloud host's Environment Variables (never in git, never in chat). Default model is `gemini-2.5-flash`; change it with `GEMINI_MODEL` (use an id from your Google AI Studio model list). Get a key at Google AI Studio (aistudio.google.com) — it is a different Google credential from Google sign-in (`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`), which identifies users; the Gemini key authorises model calls. If the key is missing or invalid, Shibu falls back to Hugging Face / rules. A free Hugging Face token is the no-cost alternative. Note: `OPENAI_API_KEY`, if still set, is used only for RAG embeddings when `EMBEDDING_PROVIDER=openai` — chat generation no longer uses OpenAI.
+**Gemini API:** Set `GEMINI_API_KEY` in `.env` (locally) or in your cloud host's Environment Variables (never in git, never in chat). Default model is `gemini-2.5-flash`; change it with `GEMINI_MODEL` (use an id from your Google AI Studio model list). Get a key at Google AI Studio (aistudio.google.com) — it is a different Google credential from Google sign-in (`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`), which identifies users; the Gemini key authorises model calls. If the key is missing or invalid, Shibu falls back to rules / maths / RAG / search snippets with a labelled limitation. Gemini is the only AI model; no other provider is called. For dense-index embeddings, `EMBEDDING_PROVIDER=gemini` (default) uses the same key with `GEMINI_EMBEDDING_MODEL` (default `text-embedding-004`).
 
-**Provider routing (Gemini vs Hugging Face):** `services/provider_router.py` decides per request, before any network call, which hosted provider answers first — no fixed queue, at most 2 provider calls per request (the chosen provider, plus exactly one fallback call to the other on failure). Drafting work (day/week plans, emails, letters, essays, long explanations, multi-part requests, prompts of 600+ chars) goes to Gemini; short/structured work (code, summaries, shorten/simplify rewrites, quizzes, how-to steps, short prompts) goes to Hugging Face. Callers that know the task kind (daily tasks, RAG summaries) pass it explicitly; other requests are classified from the prompt. `ROUTER_PREFERENCE=auto` (default) uses the classification; set it to `gemini` or `huggingface` to force the first choice (the single fallback still applies). The decision is exposed structure-only in `/api/llm/status` under `router` (preference, last decision, policy version — no prompt text). When both providers fail, the user sees one clean neutral line and the template fallback; provider detail stays in the diagnostics only.
+**Provider routing (Gemini-only):** `services/provider_router.py` always returns provider `gemini` (policy version 2); the task-kind/length classification is diagnostics only (reason + task kind, exposed structure-only in `/api/llm/status` under `router`). At most ONE Gemini call happens per request; on failure the caller uses the deterministic labelled fallback. `ROUTER_PREFERENCE=auto` (default) or `gemini`; any other value falls back to `auto`.
 
 **GitHub:** The project is ready to push — `.gitignore` excludes `.env`, `venv/`, `generated/` and `uploads/`, so no secrets or outputs are committed. Create a repo on GitHub (e.g. `shibu-ai`), then push the project folder. Never commit `.env`.
 
-**Cloud (Render, free plan):** The project includes `Procfile` (`web: python app.py`), `render.yaml`, and `runtime.txt` (Python 3.12). On Render: New > Web Service > connect your GitHub repo, it will use `render.yaml` (build: `pip install -r requirements.txt`, start: `python app.py`). Then in Render's Environment tab, set `SECRET_KEY`, and either `GEMINI_API_KEY` or `HF_TOKEN` — do not put keys in the repo. The app listens on `0.0.0.0:$PORT`, which is what a cloud host requires (locally it still opens at http://127.0.0.1:5000). Note: Render's free plan sleeps after inactivity, so the first visit after a pause can take ~30-60 seconds to wake up. Uploaded documents and generated files are stored on the server's disk, so they do not survive a redeploy/restart on a free plan — download anything important first.
+**Cloud (Render, free plan):** The project includes `Procfile` (`web: python app.py`), `render.yaml`, and `runtime.txt` (Python 3.12). On Render: New > Web Service > connect your GitHub repo, it will use `render.yaml` (build: `pip install -r requirements.txt`, start: `python app.py`). Then in Render's Environment tab, set `SECRET_KEY` and `GEMINI_API_KEY` (plus the `BROWSER_*` / `GEMINI_*` variables listed in `render.yaml` comments) — do not put keys in the repo. The app listens on `0.0.0.0:$PORT`, which is what a cloud host requires (locally it still opens at http://127.0.0.1:5000). Note: Render's free plan sleeps after inactivity, so the first visit after a pause can take ~30-60 seconds to wake up. Uploaded documents and generated files are stored on the server's disk, so they do not survive a redeploy/restart on a free plan — download anything important first.
 
 ## 19. New topics, conversation, and text-processed web answers (2026-10-27)
 

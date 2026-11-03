@@ -14,7 +14,7 @@ from chatbot.response_manager import format_response
 from chatbot.rule_engine import match_rule
 from services.math_service import MathService, looks_like_math
 from services.pdf_service import PDFService
-from services.web_search_service import WebSearchService
+from services.web_search_service import WebSearchService, search_provider_label
 from services.web_answer import (format_web_answer, clean_search_topic, filter_results,
                               _is_howto_query, _content_nouns, _result_mentions_nouns,
                               _howto_steps)
@@ -419,6 +419,63 @@ def _memory_command(text, context):
     return None
 
 
+def _search_evidence(user_message: str):
+    """(search-context block, filtered results) for web-grounded
+    LLM drafting, or ("", []).
+
+    Only how-to and news/current-info requests get one: their
+    answers depend on current external facts, so the model drafts
+    from real snippets instead of guessing. Any search failure
+    returns ("", []) and drafting proceeds exactly as before. The
+    fetch is capped by build_search_context (3 results). Evidence
+    is cleaned of instruction-like lines inside
+    build_search_context (see services/gemini_grounding)."""
+    try:
+        if not (_is_howto_query(user_message) or _is_search_request(user_message.lower())):
+            return "", []
+        from services.web_answer import build_search_context, filter_results
+        topic = clean_search_topic(user_message)
+        if not topic:
+            return "", []
+        results = filter_results(topic, search_service.search(topic))
+        return build_search_context(results), results
+    except Exception:
+        return "", []
+
+
+def _search_context_for(user_message: str) -> str:
+    """Search-context block for web-grounded LLM drafting, or ""."""
+    block, _results = _search_evidence(user_message)
+    return block
+
+
+def _labelled_search_fallback(user_message: str, context, processing_ms=0.0):
+    """Labelled fallback for a web-grounded question when Gemini
+    failed: evidence snippets + sources, in the spec's exact
+    wording, never empty, never fabricated. Returns a payload or
+    None when there is no usable search evidence (the caller then
+    falls through to the normal web / graceful path)."""
+    try:
+        _block, results = _search_evidence(user_message)
+        if not results:
+            return None
+        from services.gemini_grounding import build_labelled_fallback
+        answer = build_labelled_fallback(user_message, results)
+        payload = format_response(
+            text=answer, intent="WEB_SEARCH", rule_id="gemini_fallback",
+            confidence=0.85, tool=search_provider_label(results) + " + fallback",
+            action="Answer from retrieved sources (Gemini unavailable)",
+            extra={"search_results": results, "search_query": user_message,
+                   "sources": [{"citation": f"W{i}", "source_name": r.get("title", "Web result"),
+                                "url": r.get("url", ""), "type": "web"}
+                               for i, r in enumerate(results[:5], 1)]},
+            processing_ms=processing_ms)
+        context.add_exchange(user_message, payload["response"], "WEB_SEARCH", "gemini_fallback", 0.85)
+        return payload
+    except Exception:
+        return None
+
+
 def _llm_answer(user_message: str, context, processing_ms=0.0):
     """Try a conversational LLM answer.
 
@@ -428,11 +485,25 @@ def _llm_answer(user_message: str, context, processing_ms=0.0):
     enabled" — that was the bug that hid real API failures. When the
     model is simply off, both are None and the caller falls back to
     the rules (or, for explicit "ai:", to the not-enabled message).
+
+    For web-grounded intents the prompt carries a labelled SEARCH
+    CONTEXT block built from freshly fetched results, so the model
+    drafts from snippets instead of inventing facts. It is added in
+    exactly one place (here), never duplicated. A grounded reply
+    is validated against the evidence (services/gemini_grounding):
+    an empty, blocked, or irrelevant reply counts as a Gemini
+    failure and returns an error, so the caller uses the labelled
+    fallback instead of showing it.
     """
     manager = ModelManager()
     if manager.mode == "off":
         return None, None
     messages, _language = build_messages(context, user_message)
+    evidence = []
+    if not any("SEARCH CONTEXT" in str(m.get("content", "")) for m in messages):
+        search_context, evidence = _search_evidence(user_message)
+        if search_context:
+            messages.append({"role": "system", "content": search_context})
     previous = None
     try:
         previous = context.conversation_history[-1].get("text", "") if context.conversation_history else None
@@ -444,10 +515,15 @@ def _llm_answer(user_message: str, context, processing_ms=0.0):
     ok, cleaned, _note = validate_llm_answer(raw, previous_bot_answer=previous)
     if not ok:
         return None, "The model repeated the previous answer, so it was not shown."
+    if evidence:
+        from services.gemini_grounding import gemini_answer_usable
+        evidence_texts = [str(r.get("snippet", "")) for r in evidence]
+        if not gemini_answer_usable(cleaned, evidence_texts, question=user_message):
+            return None, "Gemini's answer did not use the retrieved evidence, so it was not shown."
     return format_response(
         text=format_llm_answer(cleaned, model_id=getattr(manager, "effective_model", None) or manager.model_id),
         intent="LLM_ANSWER", rule_id="llm_answer", confidence=0.65,
-        tool="Hugging Face LLM", action="Generate conversational answer",
+        tool="Gemini LLM", action="Generate conversational answer",
         processing_ms=processing_ms), None
 
 
@@ -549,7 +625,7 @@ def _web_fallback_answer(text: str, context, processing_ms=0.0):
     payload = format_response(
         text=format_web_answer(topic, results),
         intent="WEB_SEARCH", rule_id="web_fallback", confidence=0.85,
-        tool="DuckDuckGo search + text processing", action="Answer unknown topic from web",
+        tool=search_provider_label(results) + " + text processing", action="Answer unknown topic from web",
         extra={"search_results": results, "search_query": topic,
                "sources": [{"citation": f"W{i}", "source_name": r.get("title", "Web result"),
                             "url": r.get("url", ""), "type": "web"}
@@ -580,18 +656,18 @@ def process_single_message(message: str, context, processing_ms=0.0, web_search_
             # model not on the router, rate limit, model loading...).
             # Say THAT, with the fix — never "not enabled".
             payload = format_response(
-                text=(f"The language model is enabled, but Hugging Face could not answer this time.\n\n{llm_error}\n\n"
-                      "Your .env and token are being read (that is why /api/llm/status says 'api'). "
-                      "Fix the error above, restart Shibu if you changed the token, and try the 'ai:' message again. "
+                text=(f"The language model is enabled, but Gemini could not answer this time.\n\n{llm_error}\n\n"
+                      "Check GEMINI_API_KEY and GEMINI_MODEL in .env / Render Environment Variables "
+                      "(that is why /api/llm/status reports a Gemini error), fix the error above, "
+                      "restart Shibu if you changed the key, and try the 'ai:' message again. "
                       "Until then, ask without 'ai:' and I will answer from my rule engine."),
                 intent="LLM_ERROR", rule_id="llm_error", confidence=0.95,
-                tool="Hugging Face LLM", action="LLM call failed", processing_ms=processing_ms)
+                tool="Gemini LLM", action="LLM call failed", processing_ms=processing_ms)
             context.add_exchange(text, payload["response"], "LLM_ERROR", "llm_error", 0.95)
             return payload
         payload = format_response(
             text=("No language model is enabled yet, so I cannot give an AI-generated answer. "
-                  "Set HF_TOKEN in your .env file to use the Hugging Face API (easiest), or set "
-                  "HF_USE_LOCAL=1 and install requirements-llm.txt to run a small model on this PC. "
+                  "Set GEMINI_API_KEY in your .env file (Google AI Studio key) to enable Gemini. "
                   "Until then, ask without 'ai:' and I will answer from my rule engine."),
             intent="LLM_UNAVAILABLE", rule_id="llm_unavailable", confidence=0.95,
             tool="Rule engine", action="LLM unavailable", processing_ms=processing_ms)
@@ -725,7 +801,7 @@ def process_single_message(message: str, context, processing_ms=0.0, web_search_
             payload = format_response(
                 text=_phrase_search_results(query, results),
                 intent="WEB_SEARCH", rule_id="web_search", confidence=0.90,
-                tool="DuckDuckGo search", action="Search the web",
+                tool=search_provider_label(results), action="Search the web",
                 extra={"search_results": results, "search_query": query,
                        "sources": [{"citation": f"W{i}", "source_name": r.get("title", "Web result"),
                                     "url": r.get("url", ""), "type": "web"}
@@ -736,7 +812,7 @@ def process_single_message(message: str, context, processing_ms=0.0, web_search_
                 text=f"I tried a web search for '{query}' but no results came back (check your internet connection and try again). "
                      "This is a web-search result, not an answer from my rule database.",
                 intent="WEB_SEARCH", rule_id="web_search", confidence=0.40,
-                tool="DuckDuckGo search", action="Web search failed / no results",
+                tool="Chrome search", action="Web search failed / no results",
                 processing_ms=processing_ms)
         context.add_exchange(text, payload["response"], "WEB_SEARCH", "web_search", payload["confidence"])
         return payload
@@ -1120,6 +1196,37 @@ def process_single_message(message: str, context, processing_ms=0.0, web_search_
                 context.add_exchange(text, payload["response"], "QUIZ", "comparison_quiz", 0.90)
                 return payload
 
+    # 5o) Approved aliases (per-user, set by app.py on the
+    # context): a previously approved paraphrase answers from its
+    # canonical rule, with no guessing. Only a high-confidence
+    # alias match applies, and only when a rule exists for the
+    # canonical intent.
+    _aliases = getattr(context, "approved_aliases", None)
+    if _aliases:
+        try:
+            from services.semantic_intent import classify_semantic
+            _sem = classify_semantic(text, aliases=_aliases)
+            if _sem["similar_query_found"] and _sem["confidence"] >= 0.90 \
+                    and _sem["intent"] != "UNKNOWN":
+                _alias_rule = next(
+                    (r for r in RULES if r["intent"] == _sem["intent"] and r["id"] != "unknown"), None)
+                if _alias_rule is not None:
+                    _alias_text = _personalize_identity(
+                        _adapt_to_preferences(_alias_rule["responses"][0], context),
+                        _alias_rule["id"], character_name)
+                    payload = format_response(
+                        text=_alias_text, intent=_alias_rule["intent"],
+                        rule_id=_alias_rule["id"], confidence=_sem["confidence"],
+                        tool="Approved alias + rule engine",
+                        action="Answer approved paraphrase from canonical rule",
+                        processing_ms=processing_ms)
+                    context.add_exchange(text, payload["response"], _alias_rule["intent"],
+                                         _alias_rule["id"], _sem["confidence"],
+                                         topic=_alias_rule.get("topic", ""))
+                    return payload
+        except Exception:
+            pass
+
     # 6) Rule engine, with the LLM as a labelled fallback for UNKNOWN or
     # low-confidence answers only. High-confidence rule answers, maths,
     # search, documents and files above are never replaced by the model.
@@ -1139,6 +1246,13 @@ def process_single_message(message: str, context, processing_ms=0.0, web_search_
         if llm is not None:
             context.add_exchange(text, llm["response"], "LLM_ANSWER", "llm_answer", 0.65)
             return llm
+        if _llm_error and web_search_enabled:
+            # Gemini was enabled but failed (or its answer did not
+            # use the evidence) for a web-grounded question: the
+            # labelled evidence fallback, not a silent web answer.
+            _grounded = _labelled_search_fallback(text, context, processing_ms)
+            if _grounded is not None:
+                return _grounded
     # New: if the best rule is the generic "definition" fallback (or
     # UNKNOWN with no LLM), try a text-processed web answer first.
     # This replaces the old dead-end message for unknown topics.

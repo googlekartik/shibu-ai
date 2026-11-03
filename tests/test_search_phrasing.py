@@ -13,8 +13,8 @@ def test_search_detection_broadened():
 
 def test_search_phrasing_includes_summary_and_sources():
     results = [
-        {"title": "AI News Today", "url": "https://example.com/ai", "snippet": "AI models are getting faster", "source": "DuckDuckGo"},
-        {"title": "Tech Update", "url": "https://example.com/tech", "snippet": "New tools launched this week", "source": "DuckDuckGo"},
+        {"title": "AI News Today", "url": "https://example.com/ai", "snippet": "AI models are getting faster", "source": "Chrome"},
+        {"title": "Tech Update", "url": "https://example.com/tech", "snippet": "New tools launched this week", "source": "Chrome"},
     ]
     text = _phrase_search_results("latest AI news", results)
     assert "Here's what I found on the web" in text

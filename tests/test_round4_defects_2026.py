@@ -69,8 +69,6 @@ def test_r4_gemini_diagnostic_records_candidate_structure_without_values(monkeyp
     monkeypatch.setattr(requests, "post", _gemini_post(payload))
     monkeypatch.setenv("GEMINI_API_KEY", "k")
     monkeypatch.setenv("GEMINI_MODEL", "gemini-test")
-    monkeypatch.delenv("HF_TOKEN", raising=False)
-    monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
     manager = ModelManager()
     text, err = manager.generate("hello")
     assert text is None

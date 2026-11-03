@@ -73,11 +73,9 @@ def test_d2_howto_web_answer_drops_film_and_book_pollution():
 # ---------------------------------------------------------------- D3
 
 
-def test_d3_gemini_failure_falls_through_to_hf(monkeypatch):
+def test_d3_gemini_failure_returns_error_with_no_second_provider(monkeypatch):
     from services.model_manager import ModelManager
     monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
-    monkeypatch.delenv("HF_TOKEN", raising=False)
-    monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
 
     class _Gemini:
         def __init__(self, *a, **k):
@@ -85,27 +83,14 @@ def test_d3_gemini_failure_falls_through_to_hf(monkeypatch):
 
         def generate(self, *a, **k):
             return None, "Gemini returned HTTP 429"
-    class _HF:
-        pass
+
     monkeypatch.setattr("services.gemini_service.GeminiService", _Gemini)
-    monkeypatch.setenv("HF_TOKEN", "hf-token")
-    monkeypatch.setattr(ModelManager, "_generate_api",
-                        lambda self, *a, **k: ("HF draft answer", None))
     manager = ModelManager()
     assert manager.mode == "gemini"
     text, err = manager.generate([{"role": "user", "content": "plan my day"}])
-    assert text == "HF draft answer" and err is None
-
-    # All providers fail: one clean neutral error is returned —
-    # no provider internals, no credits/billing wording. The detail
-    # stays in the structure-only diagnostics.
-    monkeypatch.setattr(ModelManager, "_generate_api",
-                        lambda self, *a, **k: (None, "HF failed"))
-    manager = ModelManager()
-    text, err = manager.generate([{"role": "user", "content": "plan my day"}])
-    assert text is None and err == "The language model could not draft this."
-    for forbidden in ("429", "quota", "Gemini returned", "HF failed"):
-        assert forbidden not in err
+    assert text is None and err == "Gemini returned HTTP 429"
+    # Gemini-only: no second provider is ever consulted, and the
+    # deterministic fallback (not another model) answers next.
 
 
 def test_d3_fallback_template_never_discloses_provider_error(monkeypatch):

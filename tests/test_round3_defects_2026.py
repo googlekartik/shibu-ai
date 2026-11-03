@@ -237,8 +237,8 @@ def test_r3_gemini_diagnostic_is_status_and_keys_only(monkeypatch):
         "blocked_present": False,
         "text_present": False}
     assert "shape" not in str(svc.last_diagnostic)
-    from services.model_manager import _diagnostic_response_keys
-    assert _diagnostic_response_keys(
+    from services.gemini_service import _response_keys
+    assert _response_keys(
         {"id": "x", "output": []}) == ["id", "output"]
 
 
@@ -254,8 +254,6 @@ def test_r3_llm_status_exposes_provider_error_without_values(monkeypatch):
     monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp())
     monkeypatch.setenv("GEMINI_API_KEY", "k")
     monkeypatch.setenv("GEMINI_MODEL", "gemini-test")
-    monkeypatch.delenv("HF_TOKEN", raising=False)
-    monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
     manager = ModelManager()
     assert manager.mode == "gemini"
     text, err = manager.generate("hello")
@@ -268,7 +266,7 @@ def test_r3_llm_status_exposes_provider_error_without_values(monkeypatch):
     assert data["provider_error"]["status"] == 200
     assert data["provider_error"]["response_keys"] == ["output"]
     assert set(data["provider_error"]) <= {"status", "response_keys", "provider", "choice_structure",
-                                          "usage_keys"}
+                                          "usage_keys", "error_type"}
     # No "usage" object in this body: usage_keys is None, not invented.
     assert data["provider_error"]["usage_keys"] is None
     # No "choices" list at all: there is no choices[0] structure
@@ -279,29 +277,29 @@ def test_r3_llm_status_exposes_provider_error_without_values(monkeypatch):
     assert "api_key" not in json.dumps(data).lower()
 
 
-def test_r3_gemini_unparseable_falls_through_to_hf(monkeypatch):
+def test_r3_gemini_unparseable_returns_failure_with_one_call(monkeypatch):
     import requests
+    calls = {"n": 0}
 
     def _post(url, **kwargs):
+        calls["n"] += 1
+
         class _Resp:
             status_code = 200
 
             def json(self):
-                if "generativelanguage" in url:
-                    return {"candidates": [{"content": {"parts": [{"text": {"weird": 1}}]},
-                                            "finishReason": "STOP"}]}
-                return {"choices": [{"message": {"content": "hf wins"}}]}
+                return {"candidates": [{"content": {"parts": [{"text": {"weird": 1}}]},
+                                        "finishReason": "STOP"}]}
 
         return _Resp()
 
     monkeypatch.setattr(requests, "post", _post)
     monkeypatch.setenv("GEMINI_API_KEY", "k")
     monkeypatch.setenv("GEMINI_MODEL", "gemini-test")
-    monkeypatch.setenv("HF_TOKEN", "hf-token")
-    monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
     text, err = ModelManager().generate("hello")
-    assert text == "hf wins"
-    assert err is None
+    assert text is None and err is not None
+    # Exactly one Gemini call; no second provider is ever consulted.
+    assert calls["n"] == 1
 
 
 # ---------------------------------------------------------------- F4

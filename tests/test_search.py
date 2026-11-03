@@ -6,7 +6,7 @@ from services.web_search_service import WebSearchService
 
 def test_search_processing_with_mock():
     svc = WebSearchService()
-    fake = [{"title": "AI News", "url": "https://example.com", "snippet": "AI...", "source": "DuckDuckGo"}]
+    fake = [{"title": "AI News", "url": "https://example.com", "snippet": "AI...", "source": "Chrome"}]
     with patch.object(WebSearchService, "search", return_value=fake):
         results = svc.search("latest AI news")
         assert results[0]["title"] == "AI News"

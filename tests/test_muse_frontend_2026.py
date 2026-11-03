@@ -109,8 +109,8 @@ def test_profile_reports_character_name():
 
 
 def test_gemini_provider_inactive_without_key(monkeypatch):
-    for var in ("GEMINI_API_KEY", "HF_TOKEN",
-                "HF_FORCE_LOCAL", "HF_USE_LOCAL"):
+    for var in ("GEMINI_API_KEY", "GEMINI_MODEL",
+                "GEMINI_MODEL", "GEMINI_MODEL"):
         monkeypatch.delenv(var, raising=False)
     svc = GeminiService()
     assert svc.enabled is False
@@ -121,7 +121,7 @@ def test_gemini_provider_inactive_without_key(monkeypatch):
 
 
 def test_gemini_provider_mocked_success_and_manager_mode(monkeypatch):
-    for var in ("HF_TOKEN", "HF_FORCE_LOCAL", "HF_USE_LOCAL"):
+    for var in ("GEMINI_MODEL", "GEMINI_MODEL", "GEMINI_MODEL"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.delenv("GEMINI_MODEL", raising=False)

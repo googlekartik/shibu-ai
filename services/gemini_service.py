@@ -1,13 +1,12 @@
-"""Google Gemini chat service for Shibu AI — the drafting LLM option.
+"""Google Gemini chat service for Shibu AI — the ONLY drafting LLM.
 
-Why this exists: chat generation used to go through OpenAI's ChatGPT
-API; that integration has been removed. Gemini (Google AI Studio)
-is the replacement drafting provider, alongside Hugging Face
-Inference Providers for short/structured work. Which provider
-answers a request is decided per request by services/provider_router.py.
+Gemini (Google AI Studio) is the sole primary AI model. No other
+provider is called from this codebase. See docs/GEMINI_CHROME_UPGRADE.md
+for the removal history (a single historical note there; no provider
+code remains).
 
 API: Google AI Studio Gemini REST API, no SDK dependency (plain
-`requests`, like the other providers):
+`requests`):
   POST {GEMINI_API_BASE}/models/{GEMINI_MODEL}:generateContent
   header: x-goog-api-key: <GEMINI_API_KEY>  (the key is NEVER put
   in the URL query string, and never logged or returned anywhere)
@@ -35,6 +34,15 @@ exposing anything the provider returned.
 """
 
 import os
+
+
+def _gemini_timeout_seconds() -> float:
+    """GEMINI_TIMEOUT_SECONDS, bounded 5-120s (default 20)."""
+    try:
+        value = float(os.environ.get("GEMINI_TIMEOUT_SECONDS", "20"))
+    except (TypeError, ValueError):
+        value = 20.0
+    return max(5.0, min(120.0, value))
 
 
 def _safe_body(resp):
@@ -150,8 +158,8 @@ def _message_text(message) -> str:
 
 
 def build_request_body(messages, max_tokens=256, temperature=0.7):
-    """Map OpenAI-style chat messages to a Gemini generateContent
-    body. System messages become systemInstruction; user/assistant
+    """Map chat messages to a Gemini generateContent body.
+    System messages become systemInstruction; user/assistant
     turns become contents with roles "user"/"model"; consecutive
     same-role turns are merged and empty turns dropped (Gemini
     rejects empty parts and alternating roles are required)."""
@@ -205,12 +213,13 @@ def _extract_text(data) -> str | None:
 
 
 class GeminiService:
-    def __init__(self, api_key=None, model=None, api_base=None):
+    def __init__(self, api_key=None, model=None, api_base=None, timeout=None):
         self.api_key = (api_key if api_key is not None else os.environ.get("GEMINI_API_KEY", "")).strip()
         self.model = (model or os.environ.get("GEMINI_MODEL", "")).strip() or "gemini-2.5-flash"
         self.api_base = (api_base if api_base is not None
                          else os.environ.get("GEMINI_API_BASE", "")).strip() \
             or "https://generativelanguage.googleapis.com/v1beta"
+        self.timeout = float(timeout) if timeout is not None else _gemini_timeout_seconds()
         self.enabled = bool(self.api_key)
         # Structure-only diagnostic of the last HTTP response
         # (status + response key names + candidate structure + usage
@@ -220,10 +229,16 @@ class GeminiService:
 
     def status(self):
         # Safe: never includes the key.
-        return {"enabled": self.enabled, "model": self.model if self.enabled else None}
+        return {"enabled": self.enabled, "model": self.model if self.enabled else None,
+                "timeout_seconds": self.timeout}
 
     def generate(self, messages, max_tokens=256, temperature=0.7):
-        """Return (text, error). text is None on failure."""
+        """Return (text, error). text is None on failure.
+
+        Failure includes: no key, HTTP error, timeout, unparsable
+        body, blocked (SAFETY) candidates, and empty text. Callers
+        treat None as "Gemini failed" and use the deterministic
+        fallback — never a fabricated answer."""
         if not self.enabled:
             return None, "No Gemini API key is set (GEMINI_API_KEY)."
         if isinstance(messages, str):
@@ -239,7 +254,7 @@ class GeminiService:
                 headers={"x-goog-api-key": self.api_key,
                          "Content-Type": "application/json"},
                 json=body,
-                timeout=60)
+                timeout=self.timeout)
             data = _safe_body(resp)
             self.last_diagnostic = _diagnostic_for(resp.status_code, data)
             if resp.status_code == 200:

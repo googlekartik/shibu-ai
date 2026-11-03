@@ -123,6 +123,52 @@ CREATE TABLE IF NOT EXISTS dev_settings (
     setting_value TEXT DEFAULT '',
     updated_at REAL
 );
+CREATE TABLE IF NOT EXISTS user_preferences (
+    user_id TEXT NOT NULL,
+    pref_key TEXT NOT NULL,
+    pref_value TEXT NOT NULL,
+    updated_at REAL,
+    PRIMARY KEY (user_id, pref_key),
+    FOREIGN KEY (user_id) REFERENCES users(user_id)
+);
+CREATE TABLE IF NOT EXISTS approved_aliases (
+    alias_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    alias_text TEXT NOT NULL,
+    canonical_intent TEXT NOT NULL,
+    rule_id TEXT DEFAULT '',
+    confidence REAL DEFAULT 0.95,
+    version INTEGER DEFAULT 1,
+    superseded INTEGER DEFAULT 0,
+    created_at REAL,
+    FOREIGN KEY (user_id) REFERENCES users(user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_aliases_user ON approved_aliases(user_id, superseded);
+CREATE TABLE IF NOT EXISTS learning_candidates (
+    candidate_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    question_hash TEXT NOT NULL,
+    intent TEXT NOT NULL,
+    proposed_alias TEXT NOT NULL,
+    proposed_intent TEXT NOT NULL,
+    status TEXT DEFAULT 'pending',
+    evidence_count INTEGER DEFAULT 1,
+    created_at REAL, updated_at REAL,
+    FOREIGN KEY (user_id) REFERENCES users(user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_candidates_user ON learning_candidates(user_id, status);
+CREATE TABLE IF NOT EXISTS feedback_events (
+    event_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    exchange_hash TEXT NOT NULL,
+    intent TEXT DEFAULT '',
+    rule_id TEXT DEFAULT '',
+    vote TEXT NOT NULL,
+    correction TEXT DEFAULT '',
+    created_at REAL,
+    FOREIGN KEY (user_id) REFERENCES users(user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_user ON feedback_events(user_id, created_at);
 """
 
 
@@ -321,13 +367,16 @@ class SQLiteStore:
 
         Called by app.py after a chat, once the session context has
         been restored, so it never wipes memories that were only not
-        yet loaded. Every query is scoped by user_id.
+        yet loaded. Every query is scoped by user_id. Facts naming
+        a sensitive trait are skipped, never stored.
         """
+        from services.memory_service import is_sensitive_text
         self._ensure_user(user_id)
         seen, clean = set(), []
         for fact in facts or []:
             fact = " ".join(str(fact).strip().split())
-            if fact and len(fact) <= 200 and fact.lower() not in seen:
+            if fact and len(fact) <= 200 and fact.lower() not in seen \
+                    and not is_sensitive_text(fact):
                 seen.add(fact.lower())
                 clean.append(fact)
         clean = clean[-20:]
@@ -353,10 +402,11 @@ class SQLiteStore:
     def record_query_event(self, user_id: str, question: str, intent: str = "",
                            rule_id: str = "", confidence: float = 0.0,
                            is_fallback: bool = False, processing_ms: float = 0.0):
+        from services.memory_service import redact_pii
         self._conn.execute(
             "INSERT INTO query_events (event_id, user_id, question, intent, rule_id, confidence, is_fallback, processing_ms, created_at) "
             "VALUES (?,?,?,?,?,?,?,?,?)",
-            (uuid.uuid4().hex, user_id, (question or "")[:500], intent or "",
+            (uuid.uuid4().hex, user_id, redact_pii((question or "")[:500]), intent or "",
              rule_id or "", float(confidence or 0), 1 if is_fallback else 0,
              float(processing_ms or 0), self._now()))
         self._conn.commit()
@@ -443,6 +493,196 @@ class SQLiteStore:
         l = self._conn.execute("DELETE FROM login_events WHERE created_at<?", (cutoff,))
         self._conn.commit()
         return {"query_events": q.rowcount, "login_events": l.rowcount}
+
+    # -- user preferences / approved aliases / learning -----------
+    # All methods are scoped by user_id (WHERE clause, never a
+    # request parameter). Postgres persistence for these tables is
+    # future work: they live in SQLiteStore only, and the dev-panel
+    # Postgres store is untouched. On Render free, SQLite is
+    # ephemeral — the same limit as the existing user_memories.
+    def get_preferences(self, user_id: str):
+        rows = self._conn.execute(
+            "SELECT pref_key, pref_value FROM user_preferences WHERE user_id=?",
+            (user_id,)).fetchall()
+        return {r["pref_key"]: r["pref_value"] for r in rows}
+
+    def set_preference(self, user_id: str, key: str, value: str):
+        from services.memory_service import validate_preference
+        ok, cleaned = validate_preference(key, value)
+        if not ok:
+            raise ValueError(cleaned)
+        self._ensure_user(user_id)
+        self._conn.execute(
+            "INSERT INTO user_preferences (user_id, pref_key, pref_value, updated_at) VALUES (?,?,?,?) "
+            "ON CONFLICT(user_id, pref_key) DO UPDATE SET pref_value=excluded.pref_value, updated_at=excluded.updated_at",
+            (user_id, key, cleaned, self._now()))
+        self._conn.commit()
+        return cleaned
+
+    def delete_preference(self, user_id: str, key: str) -> bool:
+        cur = self._conn.execute(
+            "DELETE FROM user_preferences WHERE user_id=? AND pref_key=?", (user_id, key))
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def list_approved_aliases(self, user_id: str):
+        rows = self._conn.execute(
+            "SELECT alias_id, alias_text, canonical_intent, rule_id, confidence, version, superseded, created_at "
+            "FROM approved_aliases WHERE user_id=? AND superseded=0 ORDER BY created_at ASC",
+            (user_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def add_approved_alias(self, user_id: str, alias_text: str, canonical_intent: str,
+                           rule_id: str = "", confidence: float = 0.95):
+        """Versioned alias: an older row for the same alias text is
+        kept but marked superseded; the new row's version increments.
+        Nothing auto-applies: callers only reach here via the
+        explicit approve endpoint (or >=3 repeated occurrences,
+        which still require approval — see approve_candidate)."""
+        from services.memory_service import is_sensitive_text
+        alias_text = " ".join(str(alias_text or "").strip().split())[:300]
+        if not alias_text or is_sensitive_text(alias_text):
+            raise ValueError("Alias text is empty or names a sensitive trait.")
+        self._ensure_user(user_id)
+        row = self._conn.execute(
+            "SELECT MAX(version) AS v FROM approved_aliases WHERE user_id=? AND alias_text=?",
+            (user_id, alias_text)).fetchone()
+        version = int(row["v"] or 0) + 1
+        self._conn.execute(
+            "UPDATE approved_aliases SET superseded=1 WHERE user_id=? AND alias_text=?",
+            (user_id, alias_text))
+        alias_id = uuid.uuid4().hex
+        self._conn.execute(
+            "INSERT INTO approved_aliases (alias_id, user_id, alias_text, canonical_intent, rule_id, confidence, version, superseded, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (alias_id, user_id, alias_text, canonical_intent, rule_id,
+             float(confidence or 0.95), version, 0, self._now()))
+        self._conn.commit()
+        return alias_id
+
+    def delete_alias(self, user_id: str, alias_id: str) -> bool:
+        cur = self._conn.execute(
+            "DELETE FROM approved_aliases WHERE user_id=? AND alias_id=?", (user_id, alias_id))
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def create_or_bump_candidate(self, user_id: str, question_hash: str, intent: str,
+                                 proposed_alias: str, proposed_intent: str):
+        """One learning candidate per (user, hash, intent): repeat
+        occurrences bump evidence_count instead of creating a new
+        row. Raw question text is NEVER stored — only its hash.
+        Status stays 'pending' until an explicit approve/reject."""
+        from services.memory_service import is_sensitive_text
+        if is_sensitive_text(proposed_alias):
+            return None
+        self._ensure_user(user_id)
+        row = self._conn.execute(
+            "SELECT candidate_id, evidence_count FROM learning_candidates "
+            "WHERE user_id=? AND question_hash=? AND intent=? AND status='pending'",
+            (user_id, question_hash, intent)).fetchone()
+        now = self._now()
+        if row:
+            self._conn.execute(
+                "UPDATE learning_candidates SET evidence_count=evidence_count+1, updated_at=? WHERE candidate_id=?",
+                (now, row["candidate_id"]))
+            self._conn.commit()
+            return row["candidate_id"]
+        candidate_id = uuid.uuid4().hex
+        self._conn.execute(
+            "INSERT INTO learning_candidates (candidate_id, user_id, question_hash, intent, proposed_alias, proposed_intent, status, evidence_count, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (candidate_id, user_id, question_hash, intent, proposed_alias,
+             proposed_intent, "pending", 1, now, now))
+        self._conn.commit()
+        return candidate_id
+
+    def list_learning_candidates(self, user_id: str):
+        rows = self._conn.execute(
+            "SELECT candidate_id, question_hash, intent, proposed_alias, proposed_intent, status, evidence_count, created_at "
+            "FROM learning_candidates WHERE user_id=? ORDER BY created_at DESC",
+            (user_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def approve_candidate(self, user_id: str, candidate_id: str):
+        """Explicit approval only. Creates a versioned approved alias
+        from the candidate and marks it approved. Returns the alias
+        id, or None when the candidate is not the user's / not pending."""
+        row = self._conn.execute(
+            "SELECT * FROM learning_candidates WHERE candidate_id=? AND user_id=? AND status='pending'",
+            (candidate_id, user_id)).fetchone()
+        if not row:
+            return None
+        alias_id = self.add_approved_alias(
+            user_id, row["proposed_alias"], row["proposed_intent"],
+            rule_id="", confidence=0.95)
+        self._conn.execute(
+            "UPDATE learning_candidates SET status='approved', updated_at=? WHERE candidate_id=?",
+            (self._now(), candidate_id))
+        self._conn.commit()
+        return alias_id
+
+    def reject_candidate(self, user_id: str, candidate_id: str) -> bool:
+        cur = self._conn.execute(
+            "UPDATE learning_candidates SET status='rejected', updated_at=? WHERE candidate_id=? AND user_id=? AND status='pending'",
+            (self._now(), candidate_id, user_id))
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def record_feedback(self, user_id: str, exchange_hash: str, intent: str = "",
+                        rule_id: str = "", vote: str = "", correction: str = ""):
+        """Store one feedback event. Silence is never recorded here:
+        only an explicit thumbs-up/down or correction creates a row.
+        The correction text is capped and sensitive-trait screened."""
+        from services.memory_service import is_sensitive_text
+        if vote not in ("up", "down"):
+            raise ValueError("vote must be 'up' or 'down'.")
+        correction = " ".join(str(correction or "").strip().split())[:300]
+        if is_sensitive_text(correction):
+            correction = ""
+        self._ensure_user(user_id)
+        event_id = uuid.uuid4().hex
+        self._conn.execute(
+            "INSERT INTO feedback_events (event_id, user_id, exchange_hash, intent, rule_id, vote, correction, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (event_id, user_id, exchange_hash, intent or "", rule_id or "",
+             vote, correction, self._now()))
+        self._conn.commit()
+        return event_id
+
+    def export_user_memory(self, user_id: str):
+        """Everything the user can view/edit/delete, in one dict.
+        No other user's data is ever included (every query is
+        scoped by user_id)."""
+        return {
+            "user_id": user_id,
+            "preferences": self.get_preferences(user_id),
+            "memories": self.list_memories(user_id),
+            "approved_aliases": self.list_approved_aliases(user_id),
+            "learning_candidates": self.list_learning_candidates(user_id),
+            "documents": self.list_documents(user_id),
+        }
+
+    def clear_history(self, user_id: str):
+        """Delete the user's conversations + messages only.
+        Explicit memories, preferences and aliases are kept (the
+        user deletes those separately via /api/memory)."""
+        convs = self._conn.execute(
+            "SELECT conversation_id FROM conversations WHERE user_id=?", (user_id,)).fetchall()
+        for conv in convs:
+            self._conn.execute("DELETE FROM messages WHERE conversation_id=? AND user_id=?",
+                               (conv["conversation_id"], user_id))
+        self._conn.execute("DELETE FROM conversations WHERE user_id=?", (user_id,))
+        self._conn.commit()
+        return len(convs)
+
+    def delete_all_user_memory(self, user_id: str):
+        """Delete preferences, explicit memories, aliases,
+        candidates and feedback for one user. Documents and chat
+        history are deleted by their own endpoints."""
+        for table in ("user_preferences", "user_memories", "approved_aliases",
+                      "learning_candidates", "feedback_events"):
+            self._conn.execute(f"DELETE FROM {table} WHERE user_id=?", (user_id,))
+        self._conn.commit()
 
     def migrate_session_history(self, user_id: str, exchanges: list, confirm: bool = False):
         """Explicit migration only. confirm=False does nothing and

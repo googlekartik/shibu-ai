@@ -32,6 +32,11 @@ import os
 import re
 
 KNOWN_DIMENSIONS = {
+    "text-embedding-004": 768,
+    # Legacy dimension lookups only (no provider calls them):
+    # kept so an existing dense index configured with one of these
+    # names still validates its dimension. The embedding provider
+    # itself is Gemini (default) or Pinecone Inference.
     "text-embedding-3-small": 1536,
     "text-embedding-3-large": 3072,
     "text-embedding-ada-002": 1536,
@@ -81,8 +86,8 @@ def embedding_dimension_for_model(model: str):
 def get_rag_config() -> dict:
     """Safe to return from /api/rag/status: presence booleans only,
     never a key value, never a key length, never a key prefix."""
-    provider = os.environ.get("EMBEDDING_PROVIDER", "openai").strip().lower()
-    model = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small").strip()
+    provider = os.environ.get("EMBEDDING_PROVIDER", "gemini").strip().lower()
+    model = os.environ.get("EMBEDDING_MODEL", "text-embedding-004").strip()
     index_name = os.environ.get("PINECONE_INDEX_NAME", "").strip()
     api_key_present = bool(os.environ.get("PINECONE_API_KEY", "").strip())
     index_type = os.environ.get("PINECONE_INDEX_TYPE", "dense").strip().lower()

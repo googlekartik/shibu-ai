@@ -1,0 +1,11 @@
+# OPTIONAL — headless Chromium web search only.
+# Do NOT add this to requirements.txt: Playwright + the Chromium
+# download would bloat (and can break) the Render free build.
+# Install only when Chrome-based search on the server is wanted:
+#   pip install -r requirements-chrome.txt
+#   playwright install chromium
+# Then set BROWSER_SEARCH_ENABLED=true (the default) on the host.
+# Without this install, services/chrome_search_service.py uses the
+# Google Programmable Search JSON API when configured, else returns
+# no results — it never claims headless Chromium is running.
+playwright>=1.40

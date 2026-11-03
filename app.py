@@ -15,13 +15,12 @@ load_dotenv()
 
 from chatbot.context import ContextStore
 from chatbot.router import process_message
-from services.huggingface_service import HuggingFaceService
 from services.model_manager import ModelManager
 from services.conversation_manager import build_messages, detect_language
 from services.response_generator import validate_llm_answer, format_llm_answer
 from services.math_service import MathService
 from services.pdf_service import PDFService
-from services.web_search_service import WebSearchService
+from services.web_search_service import WebSearchService, search_provider_label
 from services.document_service import (extract_text, summarize as summarize_doc,
                                        answer_from_document, SUPPORTED_DOCUMENT_EXTENSIONS)
 from services.file_generation_service import generate_pptx, generate_docx, generate_xlsx
@@ -58,7 +57,6 @@ CORS(app)
 
 logger = get_logger()
 contexts = ContextStore()
-hf = HuggingFaceService()
 math_service = MathService()
 pdf_service = PDFService()
 search_service = WebSearchService()
@@ -135,6 +133,25 @@ def _save_chat_to_sqlite(user_message, payload):
             _sqlite_store().replace_memories(user_id, list(getattr(_context(), "memories", []) or []))
         except Exception:
             logger.exception("SQLite memory save failed (chat still returned)")
+    # Learning candidates from REPEATED successful answers only:
+    # one successful answer creates/bumps a candidate (hash only,
+    # never raw text); nothing is auto-applied — approval via
+    # /api/learning/candidates/<id>/approve is still required, and
+    # silence (no vote) is never treated as positive feedback.
+    if user_id:
+        try:
+            intent = str(payload.get("intent", ""))
+            confidence = float(payload.get("confidence") or 0)
+            if intent and intent not in ("ONBOARDING", "MEMORY", "PREFERENCE", "UNKNOWN") \
+                    and confidence >= 0.85:
+                from services.memory_service import hash_question
+                from services.semantic_intent import normalize_semantic
+                normalized = normalize_semantic(user_message)
+                if normalized:
+                    _sqlite_store().create_or_bump_candidate(
+                        user_id, hash_question(normalized), intent, normalized, intent)
+        except Exception:
+            pass
 
 
 def _document_summary_fallback(user_id: str, message: str):
@@ -432,7 +449,7 @@ def health():
         "math_service": True,
         "pdf_service": True,
         "search_service": True,
-        "huggingface": hf.enabled,
+        "gemini": bool(os.environ.get("GEMINI_API_KEY", "").strip()),
         "llm": ModelManager().status(),
         "rag": {"backend": rag_cfg["backend"], "pinecone_configured": rag_cfg["pinecone_configured"],
                 "embedding_provider": rag_cfg["embedding_provider"]},
@@ -562,6 +579,12 @@ def chat():
         _restore_context(ctx, _session_user_id(), profile["display_name"])
         if profile["display_name"]:
             ctx.display_name = profile["display_name"]
+        # Approved aliases (this user only) feed the semantic layer
+        # in the router, so an approved paraphrase is recognised.
+        try:
+            ctx.approved_aliases = _sqlite_store().list_approved_aliases(_session_user_id())
+        except Exception:
+            ctx.approved_aliases = []
         # Selected character persona for identity answers and the LLM
         # system prompt. Anonymous users get no character name, so
         # identity answers keep their plain "Shibu AI" wording.
@@ -590,7 +613,8 @@ def chat():
                 _followup_transform = _resolved_followup
         except Exception:
             _followup_transform = None
-        _route = plan_request(message_or_error)
+        _route = plan_request(message_or_error,
+                              aliases=getattr(ctx, "approved_aliases", None))
         _forced_doc = _route["use_rag"]
         try:
             _rule_rag = match_rule(message_or_error)
@@ -618,7 +642,7 @@ def chat():
                         _sources.extend({"citation": f"W{i}", "source_name": item.get("title", "Web result"),
                                          "url": item.get("url", ""), "type": "web"}
                                         for i, item in enumerate(_web_results[:5], 1))
-                        _tool = _tool + " + DuckDuckGo"
+                        _tool = _tool + " + " + search_provider_label(_web_results)
                         _action = "Combine document retrieval with current web results"
                 _payload = {"response": _rag["answer"], "intent": "RAG_ANSWER",
                             "rule_id": "rag_answer", "confidence": 0.85,
@@ -761,7 +785,8 @@ def search():
     if not ok:
         return jsonify({"error": query_or_error}), 400
     results = search_service.search(query_or_error)
-    return jsonify({"query": query_or_error, "results": results, "source": "DuckDuckGo"})
+    return jsonify({"query": query_or_error, "results": results,
+                    "source": search_provider_label(results)})
 
 
 @app.route("/api/generate-pdf", methods=["POST"])
@@ -889,7 +914,177 @@ def preferences():
             ctx.preferences["tone"] = data["tone"]
         if data.get("level") in ("normal", "beginner", "expert"):
             ctx.preferences["level"] = data["level"]
-    return jsonify(ctx.preferences)
+        # Persist per-user (logged-in only) through the validated
+        # preference store; sensitive values are refused there.
+        user_id = _session_user_id()
+        if user_id:
+            try:
+                store = _sqlite_store()
+                for key in ("tone", "level"):
+                    if key in data:
+                        store.set_preference(user_id, key, str(data[key]))
+            except Exception:
+                pass
+    merged = dict(ctx.preferences)
+    user_id = _session_user_id()
+    if user_id:
+        try:
+            stored = _sqlite_store().get_preferences(user_id)
+            for key, value in stored.items():
+                merged.setdefault(key, value)
+        except Exception:
+            pass
+    return jsonify(merged)
+
+
+def _memory_user_or_401():
+    """Logged-in user id, or None (caller returns 401). The user id
+    always comes from the session, never from a request body, so a
+    user can only view/edit/delete their own memory."""
+    return _session_user_id()
+
+
+@app.route("/api/memory", methods=["GET", "PUT", "DELETE"])
+def memory_api():
+    user_id = _memory_user_or_401()
+    if not user_id:
+        return jsonify({"error": "Please sign in first."}), 401
+    store = _sqlite_store()
+    if request.method == "GET":
+        return jsonify(store.export_user_memory(user_id))
+    data = request.get_json(silent=True) or {}
+    if request.method == "PUT":
+        # Edit: set one preference, or replace explicit memories.
+        # Both are validated: sensitive traits are refused.
+        if "key" in data and "value" in data:
+            try:
+                store.set_preference(user_id, str(data["key"]), str(data["value"]))
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 400
+            return jsonify({"preferences": store.get_preferences(user_id)})
+        if "memories" in data and isinstance(data["memories"], list):
+            store.replace_memories(user_id, [str(f) for f in data["memories"]])
+            ctx = _context()
+            ctx.memories = store.list_memories(user_id)
+            return jsonify({"memories": ctx.memories})
+        return jsonify({"error": "Send {key, value} or {memories: [...]}."}), 400
+    # DELETE: delete one preference (?key=), one alias (?alias_id=),
+    # or ALL of this user's memory (no query param).
+    key = request.args.get("key")
+    alias_id = request.args.get("alias_id")
+    if key:
+        if not store.delete_preference(user_id, key):
+            return jsonify({"error": "Preference not found."}), 404
+        return jsonify({"status": "deleted", "key": key})
+    if alias_id:
+        if not store.delete_alias(user_id, alias_id):
+            return jsonify({"error": "Alias not found."}), 404
+        return jsonify({"status": "deleted", "alias_id": alias_id})
+    store.delete_all_user_memory(user_id)
+    _context().memories = []
+    return jsonify({"status": "deleted_all"})
+
+
+@app.route("/api/memory/export", methods=["GET"])
+def memory_export():
+    user_id = _memory_user_or_401()
+    if not user_id:
+        return jsonify({"error": "Please sign in first."}), 401
+    export = _sqlite_store().export_user_memory(user_id)
+    response = jsonify(export)
+    response.headers["Content-Disposition"] = "attachment; filename=shibu-memory.json"
+    return response
+
+
+@app.route("/api/memory/disable-personalization", methods=["POST"])
+def memory_disable_personalization():
+    user_id = _memory_user_or_401()
+    if not user_id:
+        return jsonify({"error": "Please sign in first."}), 401
+    _sqlite_store().set_preference(user_id, "personalization_enabled", "false")
+    ctx = _context()
+    ctx.preferences["personalization_enabled"] = "false"
+    return jsonify({"status": "disabled", "personalization_enabled": "false"})
+
+
+@app.route("/api/memory/clear-history", methods=["POST"])
+def memory_clear_history():
+    user_id = _memory_user_or_401()
+    if not user_id:
+        return jsonify({"error": "Please sign in first."}), 401
+    cleared = _sqlite_store().clear_history(user_id)
+    session.pop("sqlite_conversation_id", None)
+    contexts.clear(_session_id())
+    session["context_restored_v1"] = True
+    return jsonify({"status": "cleared", "conversations": cleared})
+
+
+@app.route("/api/feedback", methods=["POST"])
+def feedback_api():
+    """Explicit feedback only: thumbs-up / thumbs-down / correction.
+
+    Silence is never feedback — no row is created unless the user
+    votes. A thumbs-down or a correction creates a learning
+    candidate (hash only, never raw text); nothing is auto-applied.
+    Approval happens only via /api/learning/candidates/<id>/approve.
+    """
+    user_id = _memory_user_or_401()
+    if not user_id:
+        return jsonify({"error": "Please sign in first."}), 401
+    data = request.get_json(silent=True) or {}
+    vote = str(data.get("vote", "")).strip().lower()
+    if vote not in ("up", "down"):
+        return jsonify({"error": "vote must be 'up' or 'down'."}), 400
+    from services.memory_service import hash_question, is_sensitive_text
+    exchange_hash = str(data.get("exchange_hash") or data.get("message_hash") or "")
+    if not exchange_hash:
+        exchange_hash = hash_question(str(data.get("question") or data.get("message") or ""))
+    correction = str(data.get("correction") or "")
+    if is_sensitive_text(correction):
+        return jsonify({"error": "Corrections naming a sensitive personal trait are not stored."}), 400
+    store = _sqlite_store()
+    store.record_feedback(user_id, exchange_hash,
+                          intent=str(data.get("intent") or ""),
+                          rule_id=str(data.get("rule_id") or ""),
+                          vote=vote, correction=correction)
+    candidate_id = None
+    if vote == "down" or correction:
+        proposed = " ".join(str(data.get("question") or data.get("message") or "").strip().split())
+        if proposed:
+            candidate_id = store.create_or_bump_candidate(
+                user_id, hash_question(proposed),
+                str(data.get("intent") or "UNKNOWN"),
+                proposed, str(data.get("corrected_intent") or data.get("intent") or "UNKNOWN"))
+    return jsonify({"status": "recorded", "vote": vote, "candidate_id": candidate_id})
+
+
+@app.route("/api/learning/candidates", methods=["GET"])
+def learning_candidates_api():
+    user_id = _memory_user_or_401()
+    if not user_id:
+        return jsonify({"error": "Please sign in first."}), 401
+    return jsonify({"candidates": _sqlite_store().list_learning_candidates(user_id)})
+
+
+@app.route("/api/learning/candidates/<candidate_id>/approve", methods=["POST"])
+def learning_candidate_approve(candidate_id):
+    user_id = _memory_user_or_401()
+    if not user_id:
+        return jsonify({"error": "Please sign in first."}), 401
+    alias_id = _sqlite_store().approve_candidate(user_id, candidate_id)
+    if alias_id is None:
+        return jsonify({"error": "Candidate not found or already decided."}), 404
+    return jsonify({"status": "approved", "alias_id": alias_id})
+
+
+@app.route("/api/learning/candidates/<candidate_id>/reject", methods=["POST"])
+def learning_candidate_reject(candidate_id):
+    user_id = _memory_user_or_401()
+    if not user_id:
+        return jsonify({"error": "Please sign in first."}), 401
+    if not _sqlite_store().reject_candidate(user_id, candidate_id):
+        return jsonify({"error": "Candidate not found or already decided."}), 404
+    return jsonify({"status": "rejected"})
 
 
 @app.route("/api/history")

@@ -17,6 +17,10 @@ SYNONYMS = {
     "cs": "computer science",
     "calc": "calculate", "calculation": "calculate",
     "solve": "calculate",
+    "compute": "calculate", "work out": "calculate", "find out": "calculate",
+    "percentage": "percent", "per cent": "percent", "portion": "percent",
+    "quarter": "one fourth", "three quarters": "three fourths",
+    "a quarter": "one fourth",
 }
 
 STOPWORDS = {

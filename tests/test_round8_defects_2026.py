@@ -108,8 +108,6 @@ def test_r8_manager_gemini_branch_passes_budget_and_records_diagnostic(monkeypat
     monkeypatch.setenv("SHIBU_DIAGNOSTIC_DIR", str(tmp_path))
     monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
     monkeypatch.setenv("GEMINI_MODEL", "gemini-test")
-    monkeypatch.delenv("HF_TOKEN", raising=False)
-    monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
     captured = {}
 
     def _fake_post(url, headers=None, json=None, timeout=None):

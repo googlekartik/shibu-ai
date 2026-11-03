@@ -7,11 +7,18 @@ does not use embeddings at all (it uses token-overlap retrieval,
 labelled as such), so tests can run without any embedding key.
 
 Providers:
-- openai: POST https://api.openai.com/v1/embeddings, model from
-  EMBEDDING_MODEL (default text-embedding-3-small, 1536 dims).
+- gemini: POST {GEMINI_API_BASE}/models/{GEMINI_EMBEDDING_MODEL}:
+  embedContent, key via x-goog-api-key header, model from
+  GEMINI_EMBEDDING_MODEL (default text-embedding-004, 768 dims).
+  Uses the same GEMINI_API_KEY as chat generation — no separate
+  embedding key, and no other provider is called.
 - pinecone: POST https://api.pinecone.io/embed, model from
   EMBEDDING_MODEL, input_type "passage" for documents and "query"
   for questions. This is Pinecone Inference, not a local model.
+
+Integrated Pinecone indexes (PINECONE_INDEX_TYPE=integrated)
+use neither embedder: the server embeds raw text. This module is
+only consulted for dense indexes.
 """
 from __future__ import annotations
 
@@ -46,24 +53,38 @@ def _post_json(url: str, headers: dict, payload: dict, attempts: int = 3):
     return retry_cloud_call(send, attempts=attempts)
 
 
-class OpenAIEmbedder:
-    def __init__(self, api_key=None, model=None):
-        self.api_key = (api_key if api_key is not None else os.environ.get("OPENAI_API_KEY", "")).strip()
-        self.model = (model or os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")).strip()
+class GeminiEmbedder:
+    """Gemini text embeddings via the same REST base/key as chat."""
+
+    def __init__(self, api_key=None, model=None, api_base=None):
+        self.api_key = (api_key if api_key is not None else os.environ.get("GEMINI_API_KEY", "")).strip()
+        self.model = (model or os.environ.get("GEMINI_EMBEDDING_MODEL", "")).strip() or "text-embedding-004"
+        self.api_base = (api_base if api_base is not None
+                         else os.environ.get("GEMINI_API_BASE", "")).strip() \
+            or "https://generativelanguage.googleapis.com/v1beta"
 
     def embed(self, texts: list, input_type: str = "passage", attempts: int = 3) -> list:
         if not self.api_key:
-            raise EmbeddingError("OPENAI_API_KEY is not set; cannot generate embeddings.")
+            raise EmbeddingError("GEMINI_API_KEY is not set; cannot generate embeddings.")
         if not texts:
             return []
-        data = _post_json(
-            "https://api.openai.com/v1/embeddings",
-            {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-            {"model": self.model, "input": texts}, attempts=attempts)
-        items = sorted(data.get("data", []), key=lambda x: x.get("index", 0))
-        if len(items) != len(texts):
-            raise EmbeddingError("Embedding API returned a different number of vectors than requested.")
-        return [item["embedding"] for item in items]
+        vectors = []
+        # embedContent takes one content per call; batch via embedBatch
+        # is avoided so a single failure mode stays diagnosable.
+        for text in texts:
+            task = "retrievalQuery" if input_type == "query" else "retrievalDocument"
+            data = _post_json(
+                f"{self.api_base.rstrip('/')}/models/{self.model}:embedContent",
+                {"x-goog-api-key": self.api_key, "Content-Type": "application/json"},
+                {"model": f"models/{self.model}",
+                 "content": {"parts": [{"text": text}]},
+                 "taskType": task},
+                attempts=attempts)
+            values = ((data.get("embedding") or {}).get("values"))
+            if not isinstance(values, list) or not values:
+                raise EmbeddingError("Gemini embedding API returned no vector.")
+            vectors.append(values)
+        return vectors
 
 
 class PineconeInferenceEmbedder:
@@ -91,11 +112,18 @@ def get_embedder(config: dict):
     """Return an embedder for a dense index, or None when the
     provider is not configured. Callers must treat None as
     'Pinecone RAG blocked', never as a reason to fake vectors."""
-    provider = (config or {}).get("embedding_provider", "openai")
-    if provider == "openai":
-        e = OpenAIEmbedder(model=config.get("embedding_model"))
+    provider = (config or {}).get("embedding_provider", "gemini")
+    if provider == "gemini":
+        e = GeminiEmbedder(model=config.get("embedding_model"))
         return e if e.api_key else None
     if provider == "pinecone":
-        e = PineconeInferenceEmbedder(model=config.get("embedding_model"))
+        # The Gemini default model name is not a Pinecone Inference
+        # model: when EMBEDDING_MODEL was never set for Pinecone,
+        # fall through to the Pinecone default instead of sending
+        # a Gemini model id to Pinecone.
+        model = config.get("embedding_model")
+        if model in (None, "", "text-embedding-004"):
+            model = None
+        e = PineconeInferenceEmbedder(model=model)
         return e if e.api_key else None
     return None

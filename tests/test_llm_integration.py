@@ -1,50 +1,41 @@
+"""Gemini-only LLM integration (2026-11-03): Google Gemini is
+the only AI provider. ModelManager has modes "gemini" (key set)
+and "off" (no key) only — no other provider, no local mode, no
+fallback leg. All HTTP is mocked; no keys leave the process.
+"""
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
 
-from services.model_manager import ModelManager, recommend_model, is_cached
+from services.model_manager import ModelManager
 from services.conversation_manager import build_messages, detect_language
 from services.response_generator import validate_llm_answer, format_llm_answer, is_uncertain
 from chatbot.context import ConversationContext
 from chatbot.router import process_message
 
 
-def test_recommend_model_by_ram():
-    assert recommend_model(ram_gb=4)[0] == "Qwen/Qwen2.5-0.5B-Instruct"
-    assert recommend_model(ram_gb=8)[0] == "Qwen/Qwen2.5-0.5B-Instruct"
-    assert recommend_model(ram_gb=12)[0] == "Qwen/Qwen2.5-1.5B-Instruct"
-    assert recommend_model(ram_gb=32, gpu=False)[0] == "Qwen/Qwen2.5-3B-Instruct"
-    assert recommend_model(ram_gb=32, gpu=True)[0] == "Qwen/Qwen2.5-7B-Instruct"
-    # Unknown RAM (here: whatever this machine reports) must never pick
-    # the 7B model unless a GPU is also present.
-    assert recommend_model(ram_gb=None, gpu=False)[0] != "Qwen/Qwen2.5-7B-Instruct"
-
-
-def test_model_manager_off_without_token_or_local(monkeypatch):
+def test_model_manager_off_without_key(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_MODEL", raising=False)
-    monkeypatch.delenv("HF_TOKEN", raising=False)
-    monkeypatch.delenv("HF_USE_LOCAL", raising=False)
-    monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
-    monkeypatch.delenv("HF_MODEL", raising=False)
     m = ModelManager()
     assert m.mode == "off"
     assert m.status()["how_to_enable"]
-    # The help text may name the variable HF_TOKEN, but it must never
-    # contain a token value, and there must be no "token" field at all.
+    assert "GEMINI_API_KEY" in m.status()["how_to_enable"]
+    # The status must never contain a key value, and there must be
+    # no "token" field at all.
     assert "token" not in {k.lower() for k in m.status().keys()}
     text, err = m.generate([{"role": "user", "content": "hi"}])
     assert text is None and err
 
 
-def test_model_manager_api_mode_reuses_token(monkeypatch):
-    monkeypatch.setenv("HF_TOKEN", "fake-token-for-test")
-    monkeypatch.delenv("HF_USE_LOCAL", raising=False)
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+def test_model_manager_gemini_mode_with_key(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key-for-test")
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
     m = ModelManager()
-    assert m.mode == "api"
-    assert m.model_id == "Qwen/Qwen2.5-3B-Instruct"
-    assert "fake-token" not in str(m.status())
+    assert m.mode == "gemini"
+    assert m.model_id == "gemini-2.5-flash"
+    assert "fake-key" not in str(m.status())
+    assert m.select()["mode"] == "gemini"
 
 
 def test_hindi_hinglish_detection():
@@ -73,24 +64,20 @@ def test_response_validation():
     ok, _, note = validate_llm_answer("Same answer.", previous_bot_answer="Same answer.")
     assert not ok and "repeated" in note
     assert is_uncertain("I don't know, to be honest.")
-    out = format_llm_answer("Hello.", model_id="Qwen/Qwen2.5-0.5B-Instruct")
-    assert "AI-generated answer" in out and "Qwen" in out
+    out = format_llm_answer("Hello.", model_id="gemini-2.5-flash")
+    assert "AI-generated answer" in out and "gemini" in out
 
 
 def test_hindi_greeting_rule(monkeypatch):
-    monkeypatch.delenv("HF_TOKEN", raising=False)
-    monkeypatch.delenv("HF_USE_LOCAL", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     out = process_message("Namaste", ConversationContext())
     assert out["intent"] == "HINDI_GREETING"
 
 
 def test_router_falls_back_to_rules_when_llm_off(monkeypatch):
-    monkeypatch.delenv("HF_TOKEN", raising=False)
-    monkeypatch.delenv("HF_USE_LOCAL", raising=False)
-    monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
-    # Isolate the LLM-off path from the live web: "xyzabc" is now a
-    # real TikTok hashtag, so DuckDuckGo returns results and the
-    # (intentional) web fallback would otherwise fire instead.
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    # Isolate the LLM-off path from the live web: stub search to []
+    # so the web fallback cannot fire instead of the honest fallback.
     import chatbot.router as router
     monkeypatch.setattr(router.search_service, "search", lambda q: [])
     out = process_message("some totally unknown topic xyzabc", ConversationContext())
@@ -101,7 +88,7 @@ def test_router_uses_mocked_llm_for_unknown(monkeypatch):
     import chatbot.router as router
 
     class FakeManager:
-        mode = "api"
+        mode = "gemini"
         model_id = "fake-model"
         def generate(self, messages, max_new_tokens=256, temperature=0.7):
             return "A mocked conversational answer.", None
@@ -113,12 +100,10 @@ def test_router_uses_mocked_llm_for_unknown(monkeypatch):
 
 
 def test_router_explicit_ai_when_llm_off(monkeypatch):
-    monkeypatch.delenv("HF_TOKEN", raising=False)
-    monkeypatch.delenv("HF_USE_LOCAL", raising=False)
-    monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     out = process_message("ai: explain something unknown", ConversationContext())
     assert out["intent"] == "LLM_UNAVAILABLE"
-    assert "HF_TOKEN" in out["response"]
+    assert "GEMINI_API_KEY" in out["response"]
 
 
 class _FakeResp:
@@ -141,7 +126,6 @@ def test_gemini_mode_wins_when_key_set(monkeypatch):
                                               "finishReason": "STOP"}]})
     monkeypatch.setattr(_requests, "post", fake_post)
     monkeypatch.setenv("GEMINI_API_KEY", "fake-gemini-key-for-test")
-    monkeypatch.setenv("HF_TOKEN", "fake-hf-token-for-test")
     m = ModelManager()
     assert m.mode == "gemini"
     assert m.model_id == "gemini-2.5-flash"
@@ -151,10 +135,6 @@ def test_gemini_mode_wins_when_key_set(monkeypatch):
 
 
 def test_gemini_403_gives_key_hint(monkeypatch):
-    # The detailed hint lives in GeminiService itself; ModelManager.
-    # generate() returns one clean neutral error (detail stays in
-    # structure-only diagnostics), so the hint is checked here at
-    # the service level instead of through the manager.
     import requests as _requests
     from services.gemini_service import GeminiService
     def fake_post(url, headers=None, json=None, timeout=None):
@@ -165,82 +145,47 @@ def test_gemini_403_gives_key_hint(monkeypatch):
     assert text is None and "403" in err and "GEMINI_API_KEY" in err
 
 
-def test_api_uses_router_and_parses_chat_completions(monkeypatch):
+def test_gemini_empty_and_blocked_responses_are_failures(monkeypatch):
     import requests as _requests
-    import services.model_manager as mm
+    from services.gemini_service import GeminiService
+    monkeypatch.setattr(_requests, "post",
+                        lambda *a, **k: _FakeResp(200, {"candidates": []}))
+    text, err = GeminiService(api_key="k").generate([{"role": "user", "content": "hi"}])
+    assert text is None and err
+    monkeypatch.setattr(_requests, "post", lambda *a, **k: _FakeResp(
+        200, {"candidates": [{"content": {"parts": [{"text": "x"}]},
+                              "finishReason": "SAFETY"}],
+              "promptFeedback": {"blockReason": "SAFETY"}}))
+    text, err = GeminiService(api_key="k").generate([{"role": "user", "content": "hi"}])
+    assert text is None and "blocked" in err.lower()
 
+
+def test_gemini_timeout_is_configurable_and_bounded(monkeypatch):
+    import requests as _requests
+    from services.gemini_service import GeminiService
     seen = {}
+
     def fake_post(url, headers=None, json=None, timeout=None):
-        seen["url"] = url
-        return _FakeResp(200, {"choices": [{"message": {"content": "Hello from the router."}}]})
+        seen["timeout"] = timeout
+        return _FakeResp(200, {"candidates": [{"content": {"parts": [{"text": "ok"}]},
+                                               "finishReason": "STOP"}]})
+
     monkeypatch.setattr(_requests, "post", fake_post)
-    monkeypatch.setenv("HF_TOKEN", "fake-token-for-test")
-    monkeypatch.delenv("HF_USE_LOCAL", raising=False)
-    m = ModelManager()
-    text, err = m.generate([{"role": "user", "content": "hi"}])
-    assert err is None and text == "Hello from the router."
-    assert seen["url"] == "https://router.huggingface.co/v1/chat/completions"
+    monkeypatch.setenv("GEMINI_TIMEOUT_SECONDS", "7")
+    text, _ = GeminiService(api_key="k").generate([{"role": "user", "content": "hi"}])
+    assert text == "ok" and seen["timeout"] == 7.0
+    monkeypatch.setenv("GEMINI_TIMEOUT_SECONDS", "9999")
+    assert GeminiService(api_key="k").timeout == 120.0
 
 
-def test_api_401_gives_permission_hint_not_generic_failure(monkeypatch):
-    # As above: the hint lives in _generate_api; generate() itself
-    # returns the clean neutral error, checked in the router tests.
-    import requests as _requests
-    def fake_post(url, headers=None, json=None, timeout=None):
-        return _FakeResp(401, {"error": "Invalid username or password."})
-    monkeypatch.setattr(_requests, "post", fake_post)
-    monkeypatch.setenv("HF_TOKEN", "fake-token-for-test")
-    monkeypatch.delenv("HF_USE_LOCAL", raising=False)
-    m = ModelManager()
-    text, err = m._generate_api([{"role": "user", "content": "hi"}], 256, 0.7)
-    assert text is None
-    assert "401" in err and "Inference Providers" in err
-
-
-def test_api_retries_with_auto_provider_after_400(monkeypatch):
-    import requests as _requests
-    calls = []
-    def fake_post(url, headers=None, json=None, timeout=None):
-        calls.append(json["model"])
-        if json["model"] == "Qwen/Qwen2.5-3B-Instruct":
-            return _FakeResp(400, {"error": "The requested model 'Qwen/Qwen2.5-3B-Instruct' is not supported by any provider you have enabled."})
-        return _FakeResp(200, {"choices": [{"message": {"content": "Answered via auto provider."}}]})
-    monkeypatch.setattr(_requests, "post", fake_post)
-    monkeypatch.setenv("HF_TOKEN", "fake-token-for-test")
-    monkeypatch.delenv("HF_USE_LOCAL", raising=False)
-    monkeypatch.delenv("HF_PROVIDER", raising=False)
-    m = ModelManager()
-    text, err = m.generate([{"role": "user", "content": "hi"}])
-    assert err is None and text == "Answered via auto provider."
-    assert calls[0] == "Qwen/Qwen2.5-3B-Instruct"
-    assert calls[1] == "Qwen/Qwen2.5-3B-Instruct:auto"
-    assert m.effective_model == "Qwen/Qwen2.5-3B-Instruct:auto"
-
-
-def test_api_400_after_all_providers_mentions_settings(monkeypatch):
-    # Hint checked at the _generate_api level; generate() returns
-    # the clean neutral error (see the router tests).
-    import requests as _requests
-    def fake_post(url, headers=None, json=None, timeout=None):
-        return _FakeResp(400, {"error": "The requested model 'Qwen/Qwen2.5-3B-Instruct' is not supported by any provider you have enabled."})
-    monkeypatch.setattr(_requests, "post", fake_post)
-    monkeypatch.setenv("HF_TOKEN", "fake-token-for-test")
-    monkeypatch.delenv("HF_USE_LOCAL", raising=False)
-    monkeypatch.delenv("HF_PROVIDER", raising=False)
-    m = ModelManager()
-    text, err = m._generate_api([{"role": "user", "content": "hi"}], 256, 0.7)
-    assert text is None
-    assert "inference-providers" in err and "featherless-ai" in err
-
-
-def test_explicit_ai_when_api_fails_is_llm_error_not_unavailable(monkeypatch):
+def test_explicit_ai_when_gemini_fails_is_llm_error_not_unavailable(monkeypatch):
     import chatbot.router as router
 
     class FakeManager:
-        mode = "api"
+        mode = "gemini"
         model_id = "fake-model"
         def generate(self, messages, max_new_tokens=256, temperature=0.7):
-            return None, "Hugging Face API returned HTTP 401: bad token."
+            return None, "Gemini returned HTTP 401: bad key."
     monkeypatch.setattr(router, "ModelManager", lambda: FakeManager())
     out = process_message("ai: explain something", ConversationContext())
     assert out["intent"] == "LLM_ERROR"
@@ -251,10 +196,6 @@ def test_explicit_ai_when_api_fails_is_llm_error_not_unavailable(monkeypatch):
 def test_llm_endpoints_off(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_MODEL", raising=False)
-    monkeypatch.delenv("HF_TOKEN", raising=False)
-    monkeypatch.delenv("HF_USE_LOCAL", raising=False)
-    monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
-    monkeypatch.delenv("HF_MODEL", raising=False)
     import app as app_module
     app_module.app.config["TESTING"] = True
     client = app_module.app.test_client()
@@ -264,3 +205,5 @@ def test_llm_endpoints_off(monkeypatch):
     assert "how_to_enable" in r.get_json()
     health = client.get("/api/health").get_json()
     assert health["llm"]["mode"] == "off"
+    assert health["gemini"] is False
+    assert "fake-gemini-key" not in str(health)

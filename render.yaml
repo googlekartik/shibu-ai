@@ -13,12 +13,13 @@ services:
         value: 0.0.0.0
       - key: CLOUD_ONLY
         value: "true"
-      - key: HF_USE_LOCAL
-        value: "0"
       - key: RAG_BACKEND
         value: auto
-      # Set these in the Render dashboard (never in git):
-      # OPENAI_API_KEY, HF_TOKEN, SECRET_KEY
+      # Set these in the Render dashboard (never in git, never values):
+      # GEMINI_API_KEY, GEMINI_MODEL, SECRET_KEY, BROWSER_SEARCH_ENABLED,
+      # CHROME_EXECUTABLE_PATH, SEARCH_TIMEOUT_SECONDS, MAX_SEARCH_RESULTS,
+      # GEMINI_TIMEOUT_SECONDS, GEMINI_CONFIDENCE_THRESHOLD,
+      # GEMINI_EMBEDDING_MODEL, SEMANTIC_CONFIDENCE_THRESHOLD
 
   # Developer panel: same code, separate URL. Chat is disabled on
   # this service (DEV_PANEL=1); it serves /dev only. Requires the
@@ -37,8 +38,6 @@ services:
         value: 0.0.0.0
       - key: CLOUD_ONLY
         value: "true"
-      - key: HF_USE_LOCAL
-        value: "0"
       - key: RAG_BACKEND
         value: auto
       - key: DEV_PANEL

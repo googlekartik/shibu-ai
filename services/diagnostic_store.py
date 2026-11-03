@@ -63,3 +63,12 @@ def read_diagnostic(name: str) -> dict | None:
         return data if isinstance(data, dict) else None
     except Exception:
         return None
+
+
+def delete_diagnostic(name: str) -> None:
+    """Remove a persisted diagnostic (e.g. a failure note that a
+    later success has superseded). Never raises."""
+    try:
+        os.remove(diagnostic_path(name))
+    except Exception:
+        pass

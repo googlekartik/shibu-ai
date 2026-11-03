@@ -1,58 +1,60 @@
-"""Free web search via DuckDuckGo (html endpoint, no API key).
+"""Web search: a thin wrapper over Chrome-based search.
 
-Returns a list of {title, url, snippet, source}. Gracefully returns
-[] on any network / parsing failure — the caller shows a friendly message.
-Results are always labelled as web-derived in the UI.
+The real work lives in services/chrome_search_service.py:
+headless Chromium (Playwright, else Selenium) loading a Google
+results page, falling back to the Google Programmable Search JSON
+API when both GOOGLE_SEARCH_API_KEY and GOOGLE_SEARCH_CX are set,
+then to DuckDuckGo (no keys, no browser) so search still returns
+results on hosts with neither. This wrapper preserves the
+WebSearchService.search() / max_results API and the
+{title, url, snippet, source} shape, with source "Chrome",
+"Google" or "DuckDuckGo".
+
+search_provider_label() derives the user-visible label from the
+results themselves ("Chrome search" / "Google search" /
+"DuckDuckGo search"), so the label can never name the wrong
+provider. With no results it returns "Chrome search" (the
+configured search path).
+
+API keys are read from the environment only, sent only to
+Google's API, and never logged, stored, or returned.
 """
-import html as html_lib
-import re
-import urllib.parse
-import urllib.request
+from services.chrome_search_service import ChromeSearchService
+
+
+def search_provider_label(results) -> str:
+    """User-visible tool label for a result set, derived from the
+    results themselves so the label can never name the wrong
+    provider."""
+    if results and isinstance(results, list):
+        for item in results:
+            if isinstance(item, dict) and item.get("source") == "Google":
+                return "Google search"
+        for item in results:
+            if isinstance(item, dict) and item.get("source") == "DuckDuckGo":
+                return "DuckDuckGo search"
+    return "Chrome search"
 
 
 class WebSearchService:
     def __init__(self, max_results=5):
         self.max_results = max_results
+        self._chrome = None
+
+    @property
+    def chrome_service(self):
+        # Built lazily so env vars set after construction (tests,
+        # per-request config) are honoured by the underlying service.
+        if self._chrome is None or self._chrome.max_results != self.max_results:
+            self._chrome = ChromeSearchService(max_results=self.max_results)
+        return self._chrome
 
     def search(self, query: str):
         query = (query or "").strip()
         if not query:
             return []
-        # Try the ddgs library first if the user has it installed.
         try:
-            from ddgs import DDGS  # type: ignore
-            with DDGS() as ddgs:
-                out = []
-                for r in ddgs.text(query, max_results=self.max_results) or []:
-                    out.append({"title": r.get("title", ""),
-                                "url": r.get("href", ""),
-                                "snippet": r.get("body", ""),
-                                "source": "DuckDuckGo"})
-                if out:
-                    return out
+            return self.chrome_service.search(query) or []
         except Exception:
-            pass
-        # Fallback: DuckDuckGo html endpoint, parsed with regex only.
-        try:
-            url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query)
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                page = resp.read().decode("utf-8", errors="ignore")
-            results = []
-            for block in re.findall(r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?class="result__snippet"[^>]*>(.*?)</a>',
-                                    page, flags=re.S):
-                link, title, snippet = block
-                # DuckDuckGo wraps links as //duckduckgo.com/l/?uddg=<real url>
-                parsed = urllib.parse.parse_qs(urllib.parse.urlparse(link).query)
-                real = parsed.get("uddg", [link])[0]
-                results.append({
-                    "title": html_lib.unescape(re.sub(r"<[^>]+>", "", title)).strip(),
-                    "url": urllib.parse.unquote(real),
-                    "snippet": html_lib.unescape(re.sub(r"<[^>]+>", "", snippet)).strip(),
-                    "source": "DuckDuckGo",
-                })
-                if len(results) >= self.max_results:
-                    break
-            return results
-        except Exception:
+            # A search failure must never fail the question.
             return []

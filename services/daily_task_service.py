@@ -107,6 +107,28 @@ def _llm_draft(kind: str, message: str, context) -> tuple:
         system += " Context: " + " ".join(lines)
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": message}]
+    if kind == "howto":
+        # How-to drafts are web-grounded: give the model real
+        # search snippets as labelled SEARCH CONTEXT so steps come
+        # from results instead of invention. Plans/writes are
+        # personal drafting and get no web context. Added in
+        # exactly one place (here); a failed/empty search leaves
+        # the prompt unchanged.
+        try:
+            from services.web_answer import build_search_context, clean_search_topic, filter_results
+            from services.web_search_service import WebSearchService
+        except Exception:
+            pass
+        else:
+            try:
+                topic = clean_search_topic(message)
+                results = filter_results(
+                    topic, WebSearchService().search(topic)) if topic else []
+                search_context = build_search_context(results)
+            except Exception:
+                search_context = ""
+            if search_context:
+                messages.append({"role": "system", "content": search_context})
     try:
         raw, err = manager.generate(messages, max_new_tokens=400, temperature=0.5, task_kind=kind)
     except Exception:
@@ -118,7 +140,8 @@ def _llm_draft(kind: str, message: str, context) -> tuple:
             from services.model_manager import _record_provider_diagnostic
             _record_provider_diagnostic(
                 getattr(manager, "mode", "unknown"),
-                {"status": None, "response_keys": []})
+                {"status": None, "response_keys": [],
+                 "error_type": "generate_exception"})
         except Exception:
             pass
         return None, "error", None

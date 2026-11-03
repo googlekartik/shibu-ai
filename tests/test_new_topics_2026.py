@@ -42,8 +42,8 @@ def test_text_processing_web_answer():
     assert any("Photosynthesis" in s for s in sents)
     results = [
         {"title": "Photosynthesis explained", "url": "https://example.com/photo",
-         "snippet": "Photosynthesis is how green plants make food using sunlight, water and carbon dioxide.", "source": "DuckDuckGo"},
-        {"title": "Other", "url": "https://example.com/other", "snippet": "Unrelated cats.", "source": "DuckDuckGo"},
+         "snippet": "Photosynthesis is how green plants make food using sunlight, water and carbon dioxide.", "source": "Chrome"},
+        {"title": "Other", "url": "https://example.com/other", "snippet": "Unrelated cats.", "source": "Chrome"},
     ]
     summary = summarise_web_results("what is photosynthesis", results)
     assert "Photosynthesis" in summary["summary"]
@@ -59,7 +59,7 @@ def test_web_fallback_uses_search_when_rule_is_definition(monkeypatch):
     class FakeSearch:
         def search(self, q):
             return [{"title": "Quantum computing", "url": "https://example.com/qc",
-                     "snippet": "Quantum computing uses qubits, which can be in superposition, to solve some problems faster than classical computers.", "source": "DuckDuckGo"}]
+                     "snippet": "Quantum computing uses qubits, which can be in superposition, to solve some problems faster than classical computers.", "source": "Chrome"}]
     monkeypatch.setattr(router, "search_service", FakeSearch())
     ctx = ContextStore()
     out = process_single_message("What is quantum computing?", ctx)

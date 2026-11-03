@@ -23,9 +23,9 @@ os.environ.pop("PINECONE_INDEX_NAME", None)
 os.environ.pop("DEV_PANEL", None)
 os.environ.pop("GEMINI_API_KEY", None)
 os.environ.pop("GEMINI_MODEL", None)
-os.environ.pop("HF_TOKEN", None)
-os.environ.pop("HF_USE_LOCAL", None)
-os.environ.pop("HF_FORCE_LOCAL", None)
+os.environ.pop("GEMINI_API_KEY", None)
+os.environ.pop("GEMINI_MODEL", None)
+os.environ.pop("GEMINI_MODEL", None)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -114,8 +114,6 @@ def test_r5_gemini_failure_records_diagnostic_and_survives_restart(monkeypatch, 
     _clear_diagnostics(monkeypatch, tmp_path)
     monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
     monkeypatch.setenv("GEMINI_MODEL", "gemini-test")
-    monkeypatch.delenv("HF_TOKEN", raising=False)
-    monkeypatch.delenv("HF_FORCE_LOCAL", raising=False)
     payload = {"candidates": [{"content": {"parts": [], "role": "model"},
                                "finishReason": "STOP"}],
                "usageMetadata": {}}

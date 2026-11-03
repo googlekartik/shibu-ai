@@ -28,8 +28,7 @@ Set these in the Render dashboard, never in Git or browser JavaScript:
 |---|---|---|
 | `SECRET_KEY` | Always | Flask session signing; use a long random value. |
 | `GEMINI_API_KEY` | Gemini drafting | Google Gemini chat generation (default gemini-2.5-flash). |
-| `OPENAI_API_KEY` | OpenAI embeddings only | RAG embeddings when `EMBEDDING_PROVIDER=openai`. Chat generation no longer uses OpenAI. |
-| `HF_TOKEN` | Hugging Face fallback | Hosted HF Inference Providers token. |
+| `GEMINI_EMBEDDING_MODEL` | Dense index (Gemini embeddings) | Gemini embedding model, default `text-embedding-004` (768 dims), using `GEMINI_API_KEY`. |
 | `PINECONE_API_KEY` | Pinecone RAG | Existing Pinecone account authentication. |
 | `PINECONE_INDEX_NAME` | Pinecone RAG | Existing index only; this app never creates an index. |
 | `PINECONE_INDEX_TYPE` | Pinecone RAG | `dense` or `integrated`, exactly matching the existing index. |
@@ -61,8 +60,8 @@ in place.
 
 ## Cost controls
 
-- The default OpenAI embedding model is `text-embedding-3-small`; use the
-  provider's current pricing page before enabling it.
+- The default Gemini embedding model is `text-embedding-004` (768 dims);
+  use the provider's current pricing page before enabling it.
 - Repeated same-content uploads are deduplicated; query embeddings have a short
   process-local TTL cache; upserts and embedding requests are batched.
 - `CLOUD_RETRY_ATTEMPTS` is bounded to 1–5 and retries only transient errors.
