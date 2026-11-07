@@ -216,3 +216,46 @@ def test_key_value_never_echoed_in_errors(monkeypatch):
     assert text is None
     assert "super-secret-key-value" not in err
     assert "500" in err
+
+
+def test_request_exception_is_logged_without_key(monkeypatch):
+    """A no-response failure (the live Render symptom) logs its cause.
+
+    The logger has propagation off, so capture with a handler attached
+    directly to it. The key must appear in neither the log nor the error.
+    """
+    import logging
+
+    import requests
+
+    from utils.logger import get_logger
+
+    records = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = _Capture()
+    logger = get_logger()
+    logger.addHandler(handler)
+    try:
+        def _boom(*args, **kwargs):
+            raise requests.exceptions.ConnectTimeout(
+                "HTTPSConnectionPool(host='generativelanguage.googleapis.com', "
+                "port=443): Max retries exceeded")
+
+        monkeypatch.setattr(requests, "post", _boom)
+        svc = GeminiService(api_key="super-secret-key-value",
+                            model="gemini-flash-latest")
+        text, err = svc.generate([{"role": "user", "content": "hi"}])
+        assert text is None
+        assert "Could not reach Gemini" in err
+        assert "super-secret-key-value" not in err
+        assert any("gemini generate failed" in r for r in records)
+        logged = " ".join(records)
+        assert "ConnectTimeout" in logged
+        assert "gemini-flash-latest" in logged
+        assert "super-secret-key-value" not in logged
+    finally:
+        logger.removeHandler(handler)

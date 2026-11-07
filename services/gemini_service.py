@@ -30,10 +30,28 @@ Diagnostics are structure-only (HTTP status, response top-level
 key names, candidate structure, usage key names — never message
 text, never the key, never payload values), matching the other
 providers, so /api/llm/status can diagnose a failure without
-exposing anything the provider returned.
+exposing anything the provider returned. A request that fails
+before any HTTP response arrives is also logged once (exception
+type + message + elapsed time, never the key) so a host's logs
+can name the cause.
 """
 
 import os
+import re
+import time
+
+from utils.logger import get_logger
+
+_logger = get_logger()
+
+
+def _redact(text):
+    """Hide anything that looks like a credential value (key=..., key: ...).
+
+    Only `=`/`:` forms are redacted, so ordinary prose containing the
+    word "key" is left alone.
+    """
+    return re.sub(r"(Bearer|token|key)[=:]\s*\S+", r"\1 [hidden]", text, flags=re.I)
 
 
 def _gemini_timeout_seconds() -> float:
@@ -247,6 +265,7 @@ class GeminiService:
         if not body["contents"]:
             return None, "Gemini returned a response in an unexpected format."
         url = f"{self.api_base.rstrip('/')}/models/{self.model}:generateContent"
+        started = time.monotonic()
         try:
             import requests
             resp = requests.post(
@@ -286,4 +305,13 @@ class GeminiService:
                               "Wait and try again, or check your Google AI Studio quota.")
             return None, f"Gemini returned HTTP {code}: {msg}"
         except Exception as exc:
-            return None, f"Could not reach Gemini: {exc}"[:300]
+            # The failure leaves no trace in /api/llm/status beyond
+            # "no_http_response", so log it once here (type + message +
+            # elapsed time; never the key) so a host's logs name the cause.
+            elapsed_ms = (time.monotonic() - started) * 1000.0
+            _logger.error(
+                "gemini generate failed model=%s timeout_s=%.0f elapsed_ms=%.1f "
+                "error_type=%s error=%s",
+                self.model, self.timeout, elapsed_ms,
+                type(exc).__name__, _redact(str(exc))[:300])
+            return None, f"Could not reach Gemini: {_redact(str(exc))}"[:300]
